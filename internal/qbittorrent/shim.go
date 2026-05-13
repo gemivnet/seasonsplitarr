@@ -118,7 +118,11 @@ func (s *Shim) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok := s.session.issue()
-	http.SetCookie(w, &http.Cookie{
+	// Secure=false intentionally: Sonarr typically reaches seasonsplitarr
+	// over plain HTTP inside the docker network. With Secure=true the client
+	// would refuse to send the cookie back, breaking auth. If you expose
+	// this to the internet, run it behind a TLS-terminating reverse proxy.
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- see comment above
 		Name:     "SID",
 		Value:    tok,
 		Path:     "/",
@@ -133,7 +137,8 @@ func (s *Shim) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie("SID"); err == nil {
 		s.session.revoke(c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: "SID", Value: "", Path: "/", MaxAge: -1})
+	// Same Secure=false rationale as in handleLogin.
+	http.SetCookie(w, &http.Cookie{Name: "SID", Value: "", Path: "/", MaxAge: -1}) // #nosec G124
 	fmt.Fprint(w, "Ok.")
 }
 
@@ -166,7 +171,7 @@ func (s *Shim) handleAdd(w http.ResponseWriter, r *http.Request) {
 	// mapping. The grabber treats it the same way as a synthetic grab; the
 	// season detector still works on the file list.
 	if _, ok := s.Store.Get(synthHash); ok {
-		s.Store.Update(synthHash, func(gr *store.Grab) {
+		_, _ = s.Store.Update(synthHash, func(gr *store.Grab) {
 			gr.Magnet = magnet
 			gr.Category = category
 		})

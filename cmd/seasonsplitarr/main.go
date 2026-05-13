@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/gemivnet/seasonsplitarr/internal/config"
 	"github.com/gemivnet/seasonsplitarr/internal/debrid"
@@ -23,7 +24,8 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	if err := os.MkdirAll(cfg.DownloadsDir, 0o755); err != nil {
+	// 0o755: shared with Sonarr's bind-mounted import path.
+	if err := os.MkdirAll(cfg.DownloadsDir, 0o755); err != nil { // #nosec G301 -- shared-volume scenario
 		log.Fatalf("downloads dir: %v", err)
 	}
 
@@ -52,7 +54,7 @@ func main() {
 	mux.Handle("/torznab/", http.StripPrefix("/torznab", proxy.Handler()))
 	mux.Handle("/api/v2/", shim.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -61,7 +63,11 @@ func main() {
 	// Grabber polls the store and drives RD downloads.
 	go gr.Run(ctx)
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())

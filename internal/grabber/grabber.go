@@ -70,7 +70,7 @@ func (g *Grabber) tick(ctx context.Context) {
 			defer g.inflight.Delete(synthHash)
 			if err := g.advance(ctx, synthHash); err != nil {
 				log.Printf("grab %s: %v", synthHash, err)
-				g.Store.Update(synthHash, func(gr *store.Grab) {
+				_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
 					gr.State = store.StateError
 					gr.Error = err.Error()
 				})
@@ -103,7 +103,7 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 			}
 			rdID = res.ID
 		}
-		g.Store.Update(synthHash, func(gr *store.Grab) {
+		_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
 			gr.RDTorrentID = rdID
 			gr.State = store.StateDownloading
 		})
@@ -135,7 +135,7 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 
 	if info.Status != "downloaded" {
 		// Still downloading on RD's side; update progress and wait.
-		g.Store.Update(synthHash, func(gr *store.Grab) {
+		_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
 			gr.TotalBytes = info.Bytes
 			gr.DoneBytes = int64(info.Progress) * info.Bytes / 100
 		})
@@ -147,7 +147,7 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 		return fmt.Errorf("materialise: %w", err)
 	}
 
-	g.Store.Update(synthHash, func(gr *store.Grab) {
+	_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
 		gr.State = store.StateReady
 		gr.CompletedAt = time.Now().UTC()
 		gr.DoneBytes = gr.TotalBytes
@@ -197,11 +197,13 @@ func (g *Grabber) materialise(ctx context.Context, grab *store.Grab, info *debri
 	}
 
 	seasonDir := filepath.Join(grab.SavePath, fmt.Sprintf("Season %02d", grab.Season))
-	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+	// 0o755: shared with Sonarr's import scan; tightening to 0o750 breaks
+	// setups where Sonarr runs as a different uid/gid than seasonsplitarr.
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil { // #nosec G301 -- shared-volume scenario
 		return err
 	}
 	cacheRoot := filepath.Join(g.DownloadsDir, ".cache", strings.ToLower(grab.RealHash))
-	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+	if err := os.MkdirAll(cacheRoot, 0o755); err != nil { // #nosec G301 -- shared-volume scenario
 		return err
 	}
 
@@ -233,7 +235,7 @@ func (g *Grabber) materialise(ctx context.Context, grab *store.Grab, info *debri
 		totalBytes += p.f.Bytes
 	}
 
-	g.Store.Update(grab.SynthHash, func(gr *store.Grab) {
+	_, _ = g.Store.Update(grab.SynthHash, func(gr *store.Grab) {
 		gr.ContentPath = seasonDir
 		gr.TotalBytes = totalBytes
 	})
@@ -246,11 +248,13 @@ func (g *Grabber) downloadOne(ctx context.Context, restrictedLink, dst string) e
 		return fmt.Errorf("unrestrict: %w", err)
 	}
 	tmp := dst + ".part"
-	f, err := os.Create(tmp)
+	// dst is built from a validated infohash + filepath.Base of an RD path
+	// (no traversal possible), under a directory we created.
+	f, err := os.Create(tmp) // #nosec G304 -- path components are sanitised upstream
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := g.RD.DownloadFile(ctx, u.Download, f); err != nil {
 		_ = os.Remove(tmp)
 		return err

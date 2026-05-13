@@ -80,7 +80,7 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write(rewritten)
+	_, _ = w.Write(rewritten)
 }
 
 func (p *Proxy) client() *http.Client {
@@ -95,7 +95,7 @@ func passThrough(w http.ResponseWriter, resp *http.Response, body []byte) {
 		w.Header().Set("Content-Type", ct)
 	}
 	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+	_, _ = w.Write(body)
 }
 
 // --- feed rewriting ---

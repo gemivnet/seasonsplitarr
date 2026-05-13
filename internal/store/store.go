@@ -60,10 +60,14 @@ func Open(path string) (*Store, error) {
 	if path == "" {
 		return s, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// 0o755 to allow other *arr containers to read shared parent dirs; the
+	// state file itself is written 0o600 in flushLocked.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { // #nosec G301 -- shared-volume scenario
 		return nil, err
 	}
-	b, err := os.ReadFile(path)
+	// path is operator-controlled (SS_DOWNLOADS_DIR env), not user input.
+	b, err := os.ReadFile(path) // #nosec G304 -- operator-controlled path
+
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return s, nil

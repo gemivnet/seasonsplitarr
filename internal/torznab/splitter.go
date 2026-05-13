@@ -1,7 +1,7 @@
 package torznab
 
 import (
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"regexp"
@@ -77,6 +77,9 @@ func SyntheticGUID(infohash string, season int) string {
 // hash-keyed data model (which Sonarr relies on for status lookups) treats
 // the per-season releases as distinct torrents.
 func SyntheticInfohash(realHash string, season int) string {
-	h := sha1.Sum([]byte(strings.ToLower(realHash) + ":s" + strconv.Itoa(season)))
-	return hex.EncodeToString(h[:])
+	// sha256 truncated to 20 bytes / 40 hex chars to match btih length.
+	// Not security-sensitive — we just need collision resistance and
+	// determinism for deriving per-season identifiers.
+	h := sha256.Sum256([]byte(strings.ToLower(realHash) + ":s" + strconv.Itoa(season)))
+	return hex.EncodeToString(h[:20])
 }
