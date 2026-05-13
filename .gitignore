@@ -1,0 +1,9 @@
+/seasonsplitarr
+/bin/
+/dist/
+config.yaml
+*.db
+*.sqlite
+.DS_Store
+.idea/
+.vscode/

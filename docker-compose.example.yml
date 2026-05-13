@@ -1,0 +1,34 @@
+# Example compose file. Copy to docker-compose.yml, fill in the env values,
+# and run `docker compose up -d`. All seasonsplitarr configuration is here —
+# there is no config file.
+
+services:
+  seasonsplitarr:
+    image: ghcr.io/gemivnet/seasonsplitarr:latest
+    container_name: seasonsplitarr
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+    environment:
+      # Upstream Torznab endpoint that seasonsplitarr proxies. Easiest:
+      # point this at one of your Prowlarr-indexer URLs (copy from
+      # Prowlarr → Indexers → the indexer → "Copy Torznab Feed").
+      SS_UPSTREAM_URL: "http://prowlarr:9696/1/api"
+      SS_UPSTREAM_APIKEY: "REPLACE_WITH_UPSTREAM_APIKEY"
+
+      # API key that seasonsplitarr requires from incoming requests.
+      # Generate any random string — you'll paste it into Prowlarr when
+      # adding seasonsplitarr as a Generic Torznab indexer.
+      SS_APIKEY: "REPLACE_WITH_A_RANDOM_STRING"
+
+      # Real-Debrid token from https://real-debrid.com/apitoken
+      SS_REALDEBRID_TOKEN: "REPLACE_WITH_RD_TOKEN"
+
+      # Where per-season folders are materialised. Mount this path
+      # IDENTICALLY in Sonarr so import scans see the same files.
+      SS_DOWNLOADS_DIR: "/downloads/seasonsplitarr"
+
+      # Optional. Defaults to 0.0.0.0:7474.
+      # SS_LISTEN: "0.0.0.0:7474"
+    volumes:
+      - /path/to/downloads:/downloads
