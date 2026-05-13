@@ -18,6 +18,10 @@ type Proxy struct {
 	// must present.
 	LocalAPIKey string
 	Client      *http.Client
+	// OnSynthetic is called for every synthetic per-season release emitted.
+	// Implementations typically register the grab in the state store so the
+	// download client side can resolve synthHash -> (realHash, magnet, season).
+	OnSynthetic func(synthHash, realHash, magnet string, season int, title string)
 }
 
 func (p *Proxy) Handler() http.Handler {
@@ -62,7 +66,7 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rewritten, err := splitFeed(body)
+	rewritten, err := splitFeed(body, p.OnSynthetic)
 	if err != nil {
 		// On any parse error, fail open: serve the upstream response unchanged.
 		passThrough(w, resp, body)
@@ -128,7 +132,7 @@ type anyEl struct {
 	Inner   string     `xml:",innerxml"`
 }
 
-func splitFeed(body []byte) ([]byte, error) {
+func splitFeed(body []byte, onSynth func(synthHash, realHash, magnet string, season int, title string)) ([]byte, error) {
 	var feed rss
 	if err := xml.Unmarshal(body, &feed); err != nil {
 		return nil, err
@@ -141,8 +145,14 @@ func splitFeed(body []byte) ([]byte, error) {
 			continue
 		}
 		ih := extractInfohash(it)
+		magnet := magnetFromItem(it)
 		for s := sr.Start; s <= sr.End; s++ {
-			out = append(out, synthItem(it, sr, s, ih))
+			si := synthItem(it, sr, s, ih)
+			if onSynth != nil && ih != "" {
+				synthHash := SyntheticInfohash(ih, s)
+				onSynth(synthHash, strings.ToLower(ih), magnet, s, si.Title)
+			}
+			out = append(out, si)
 		}
 	}
 	feed.Channel.Items = out
@@ -162,7 +172,57 @@ func synthItem(orig item, sr *SeasonRange, season int, infohash string) item {
 		id = orig.GUID
 	}
 	clone.GUID = SyntheticGUID(id, season)
+	synthHash := SyntheticInfohash(id, season)
+
+	// Rewrite magnet URLs so the synthetic release carries its own infohash.
+	// qBit-shaped download clients (and Sonarr's grab-tracking) key on the
+	// btih in the magnet — without this, all synthetic seasons for one pack
+	// would collide on the same hash.
+	if clone.Enclosure != nil {
+		clone.Enclosure.URL = rewriteMagnetInfohash(clone.Enclosure.URL, synthHash)
+	}
+	if clone.Link != "" {
+		clone.Link = rewriteMagnetInfohash(clone.Link, synthHash)
+	}
+	// Also rewrite a torznab:attr infohash element if present so Prowlarr/Sonarr
+	// pick up the synthetic hash from any path they choose.
+	for i, a := range clone.Attrs {
+		if !strings.EqualFold(a.XMLName.Local, "attr") {
+			continue
+		}
+		var nameVal string
+		for _, at := range a.Attrs {
+			if strings.EqualFold(at.Name.Local, "name") {
+				nameVal = at.Value
+			}
+		}
+		if !strings.EqualFold(nameVal, "infohash") {
+			continue
+		}
+		for j, at := range a.Attrs {
+			if strings.EqualFold(at.Name.Local, "value") {
+				clone.Attrs[i].Attrs[j].Value = synthHash
+			}
+		}
+	}
 	return clone
+}
+
+// rewriteMagnetInfohash replaces the xt=urn:btih:<hash> component of a magnet
+// URL with the supplied synthetic hash. Non-magnet URLs and inputs that
+// don't contain a btih are returned unchanged.
+func rewriteMagnetInfohash(s, newHash string) string {
+	const xt = "xt=urn:btih:"
+	i := strings.Index(s, xt)
+	if i < 0 {
+		return s
+	}
+	rest := s[i+len(xt):]
+	end := strings.IndexAny(rest, "&")
+	if end < 0 {
+		return s[:i+len(xt)] + newHash
+	}
+	return s[:i+len(xt)] + newHash + rest[end:]
 }
 
 func extractInfohash(it item) string {
@@ -190,6 +250,17 @@ func extractInfohash(it item) string {
 	}
 	if h := infohashFromMagnet(it.Link); h != "" {
 		return h
+	}
+	return ""
+}
+
+// magnetFromItem returns the magnet URL on an item, preferring enclosure.url.
+func magnetFromItem(it item) string {
+	if it.Enclosure != nil && strings.HasPrefix(it.Enclosure.URL, "magnet:") {
+		return it.Enclosure.URL
+	}
+	if strings.HasPrefix(it.Link, "magnet:") {
+		return it.Link
 	}
 	return ""
 }

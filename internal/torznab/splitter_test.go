@@ -28,6 +28,21 @@ func TestDetect(t *testing.T) {
 	}
 }
 
+func TestSyntheticInfohashDeterministic(t *testing.T) {
+	a := SyntheticInfohash("aabbccddeeff", 3)
+	b := SyntheticInfohash("aabbccddeeff", 3)
+	c := SyntheticInfohash("aabbccddeeff", 4)
+	if a != b {
+		t.Errorf("SyntheticInfohash not deterministic: %q vs %q", a, b)
+	}
+	if a == c {
+		t.Errorf("SyntheticInfohash collided across seasons: %q", a)
+	}
+	if len(a) != 40 {
+		t.Errorf("SyntheticInfohash length = %d, want 40 (btih)", len(a))
+	}
+}
+
 func TestSyntheticTitle(t *testing.T) {
 	sr := Detect("Some.Show.S01-S05.COMPLETE.1080p.x264-GRP")
 	if sr == nil {

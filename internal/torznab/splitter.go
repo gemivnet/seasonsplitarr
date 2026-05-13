@@ -68,6 +68,15 @@ func SyntheticTitle(original string, sr *SeasonRange, season int) string {
 // SyntheticGUID returns a deterministic GUID for a (infohash, season) pair so
 // the same synthetic release re-resolves to the same identity on re-search.
 func SyntheticGUID(infohash string, season int) string {
-	h := sha1.Sum([]byte(strings.ToLower(infohash) + ":s" + strconv.Itoa(season)))
-	return "seasonsplitarr-" + hex.EncodeToString(h[:])
+	return "seasonsplitarr-" + SyntheticInfohash(infohash, season)
+}
+
+// SyntheticInfohash returns a deterministic 40-char hex string (i.e. a valid
+// btih) derived from the underlying torrent's real infohash plus a season.
+// Each synthetic release carries this as its xt=urn:btih: so qBit's
+// hash-keyed data model (which Sonarr relies on for status lookups) treats
+// the per-season releases as distinct torrents.
+func SyntheticInfohash(realHash string, season int) string {
+	h := sha1.Sum([]byte(strings.ToLower(realHash) + ":s" + strconv.Itoa(season)))
+	return hex.EncodeToString(h[:])
 }
