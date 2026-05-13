@@ -15,9 +15,8 @@
 > blocker for you, please **fork the repo** in accordance with the
 > [AGPL-3.0 license](./LICENSE) and adapt it to your needs.
 >
-> Security issues: please report via
-> [GitHub Security Advisories](https://github.com/gemivnet/seasonsplitarr/security/advisories/new)
-> rather than public issues. See [SECURITY.md](./SECURITY.md).
+> Security issues: report however you prefer — see
+> [SECURITY.md](./SECURITY.md) for options. No SLA, no commitment.
 
 Sonarr can't import a torrent that contains multiple seasons in one release
 (e.g. `Some.Show.S01-S07.COMPLETE.1080p...`). It will grab only the first

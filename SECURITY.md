@@ -2,13 +2,16 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately via
-[GitHub Security Advisories](https://github.com/gemivnet/seasonsplitarr/security/advisories/new).
-Do **not** open a public issue or post on Reddit — give us a chance to ship
-a fix before the details are public. We aim to acknowledge within 72 hours.
+seasonsplitarr is a personal project shared publicly. You're welcome to
+report security issues however you prefer — there are no rules here:
 
-If GHSA isn't workable for you, anything actionable in a public-but-vague
-issue ("there's an auth bypass in X — DM me") is also fine.
+- [GitHub Security Advisories](https://github.com/gemivnet/seasonsplitarr/security/advisories/new) if you want to coordinate privately first.
+- A regular [public issue](https://github.com/gemivnet/seasonsplitarr/issues) is also fine.
+- Public disclosure (Reddit, blog, etc.) is your call. I'd ask for a heads-up if it's practical, but you don't owe me one.
+
+I'll do my best to fix what comes in, but **no commitment** on response
+time or whether a fix ships at all. If something's blocking you, the
+[license](./LICENSE) lets you fork.
 
 ## Threat model
 
