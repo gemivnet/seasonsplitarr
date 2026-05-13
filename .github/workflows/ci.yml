@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Opt in to Node 24 ahead of the June 2026 default flip so we don't carry
+  # deprecation warnings on every run.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -17,6 +22,8 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+          # No external deps -> no go.sum -> cache key would fail to resolve.
+          cache: false
 
       - name: go vet
         run: go vet ./...
