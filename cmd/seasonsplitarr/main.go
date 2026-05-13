@@ -39,10 +39,7 @@ func main() {
 		DownloadsDir: cfg.DownloadsDir,
 	}
 
-	shim := &qbittorrent.Shim{
-		DownloadsDir: cfg.DownloadsDir,
-		Store:        st,
-	}
+	shim := qbittorrent.NewShim(cfg.DownloadsDir, cfg.QBitUsername, cfg.QBitPassword, st)
 
 	proxy := &torznab.Proxy{
 		UpstreamURL:    cfg.UpstreamURL,

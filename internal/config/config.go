@@ -11,12 +11,20 @@ import (
 )
 
 type Config struct {
-	Listen           string
-	UpstreamURL      string
-	UpstreamAPIKey   string
-	APIKey           string
-	RealDebridToken  string
-	DownloadsDir     string
+	Listen          string
+	UpstreamURL     string
+	UpstreamAPIKey  string
+	APIKey          string
+	RealDebridToken string
+	DownloadsDir    string
+
+	// QBitUsername / QBitPassword gate the qBittorrent-compatible download
+	// client surface. They are REQUIRED — Sonarr will log in with them, and
+	// every other request on /api/v2/* requires the resulting SID cookie.
+	// Without these set, any host on the network could submit magnets and
+	// read grab state.
+	QBitUsername string
+	QBitPassword string
 }
 
 func Load() (*Config, error) {
@@ -27,6 +35,8 @@ func Load() (*Config, error) {
 		APIKey:          os.Getenv("SS_APIKEY"),
 		RealDebridToken: os.Getenv("SS_REALDEBRID_TOKEN"),
 		DownloadsDir:    getenv("SS_DOWNLOADS_DIR", "/downloads/seasonsplitarr"),
+		QBitUsername:    os.Getenv("SS_QBIT_USERNAME"),
+		QBitPassword:    os.Getenv("SS_QBIT_PASSWORD"),
 	}
 
 	var missing []string
@@ -36,8 +46,20 @@ func Load() (*Config, error) {
 	if c.APIKey == "" {
 		missing = append(missing, "SS_APIKEY")
 	}
+	if c.QBitUsername == "" {
+		missing = append(missing, "SS_QBIT_USERNAME")
+	}
+	if c.QBitPassword == "" {
+		missing = append(missing, "SS_QBIT_PASSWORD")
+	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
+	}
+	if len(c.APIKey) < 16 {
+		return nil, fmt.Errorf("SS_APIKEY must be at least 16 characters")
+	}
+	if len(c.QBitPassword) < 12 {
+		return nil, fmt.Errorf("SS_QBIT_PASSWORD must be at least 12 characters")
 	}
 	return c, nil
 }

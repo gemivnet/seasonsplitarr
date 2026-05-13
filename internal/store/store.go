@@ -169,7 +169,9 @@ func (s *Store) flushLocked() error {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	// 0o600: state contains magnet URLs and RD torrent IDs. Not catastrophic
+	// if leaked but no reason for other local users to read it.
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, s.path)

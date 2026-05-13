@@ -1,6 +1,7 @@
 package torznab
 
 import (
+	"crypto/subtle"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -32,7 +33,12 @@ func (p *Proxy) Handler() http.Handler {
 }
 
 func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
-	if p.LocalAPIKey != "" && r.URL.Query().Get("apikey") != p.LocalAPIKey {
+	if p.LocalAPIKey == "" {
+		http.Error(w, "server misconfigured: no apikey set", http.StatusInternalServerError)
+		return
+	}
+	got := r.URL.Query().Get("apikey")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(p.LocalAPIKey)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

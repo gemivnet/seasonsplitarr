@@ -16,10 +16,17 @@ services:
       SS_UPSTREAM_URL: "http://prowlarr:9696/1/api"
       SS_UPSTREAM_APIKEY: "REPLACE_WITH_UPSTREAM_APIKEY"
 
-      # API key that seasonsplitarr requires from incoming requests.
-      # Generate any random string — you'll paste it into Prowlarr when
-      # adding seasonsplitarr as a Generic Torznab indexer.
-      SS_APIKEY: "REPLACE_WITH_A_RANDOM_STRING"
+      # API key that seasonsplitarr requires for Torznab calls. Generate
+      # any random string >= 16 chars (e.g. `openssl rand -hex 24`); you'll
+      # paste it into Prowlarr when adding seasonsplitarr as an indexer.
+      SS_APIKEY: "REPLACE_WITH_A_RANDOM_32CHAR_STRING"
+
+      # Credentials Sonarr will use to log in to the qBittorrent-compatible
+      # download-client interface. WITHOUT THESE, anyone on the network
+      # could submit magnets and read your grab state. Password must be
+      # >= 12 chars; use `openssl rand -base64 18` for a strong one.
+      SS_QBIT_USERNAME: "sonarr"
+      SS_QBIT_PASSWORD: "REPLACE_WITH_A_STRONG_PASSWORD"
 
       # Real-Debrid token from https://real-debrid.com/apitoken
       SS_REALDEBRID_TOKEN: "REPLACE_WITH_RD_TOKEN"

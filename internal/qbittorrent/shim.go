@@ -21,6 +21,7 @@
 package qbittorrent
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -32,24 +33,53 @@ import (
 	"github.com/gemivnet/seasonsplitarr/internal/torznab"
 )
 
+// isInfohash returns true if s is a 40-char lowercase hex string. We require
+// this before any value derived from a user-supplied magnet is used in a
+// filesystem path, to prevent traversal.
+func isInfohash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
 type Shim struct {
 	// DownloadsDir is the root under which per-grab/per-season folders are
 	// materialised. Sonarr import-scans inside SavePath = DownloadsDir/<grab>.
 	DownloadsDir string
 	Store        *store.Store
+
+	session *session
+}
+
+// NewShim constructs a Shim with credential-protected qBit endpoints. The
+// caller must provide non-empty username and password; auth bypass on the
+// download client surface would expose the user's Real-Debrid quota and
+// allow arbitrary library writes.
+func NewShim(downloadsDir, username, password string, st *store.Store) *Shim {
+	return &Shim{
+		DownloadsDir: downloadsDir,
+		Store:        st,
+		session:      newSession(username, password),
+	}
 }
 
 func (s *Shim) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/v2/auth/login", okHandler)
-	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
+	// Login is intentionally unauthenticated — that's how Sonarr obtains the
+	// SID cookie. Everything else requires the cookie via requireAuth.
+	mux.HandleFunc("/api/v2/auth/login", s.handleLogin)
+	mux.HandleFunc("/api/v2/auth/logout", s.handleLogout)
+
+	mux.HandleFunc("/api/v2/app/version", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "v4.6.0")
-	})
-	mux.HandleFunc("/api/v2/app/webapiVersion", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/v2/app/webapiVersion", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "2.9.3")
-	})
-	mux.HandleFunc("/api/v2/app/preferences", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/v2/app/preferences", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"save_path":         s.DownloadsDir,
 			"temp_path":         s.DownloadsDir,
@@ -57,24 +87,54 @@ func (s *Shim) Handler() http.Handler {
 			"queueing_enabled":  false,
 			"dht":               true,
 		})
-	})
+	}))
 
-	mux.HandleFunc("/api/v2/torrents/add", s.handleAdd)
-	mux.HandleFunc("/api/v2/torrents/info", s.handleInfo)
-	mux.HandleFunc("/api/v2/torrents/properties", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v2/torrents/add", s.requireAuth(s.handleAdd))
+	mux.HandleFunc("/api/v2/torrents/info", s.requireAuth(s.handleInfo))
+	mux.HandleFunc("/api/v2/torrents/properties", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{})
-	})
-	mux.HandleFunc("/api/v2/torrents/files", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/v2/torrents/files", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []any{})
-	})
-	mux.HandleFunc("/api/v2/torrents/delete", s.handleDelete)
-	mux.HandleFunc("/api/v2/torrents/setCategory", okHandler)
-	mux.HandleFunc("/api/v2/torrents/createCategory", okHandler)
-	mux.HandleFunc("/api/v2/torrents/categories", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/v2/torrents/delete", s.requireAuth(s.handleDelete))
+	mux.HandleFunc("/api/v2/torrents/setCategory", s.requireAuth(okHandler))
+	mux.HandleFunc("/api/v2/torrents/createCategory", s.requireAuth(okHandler))
+	mux.HandleFunc("/api/v2/torrents/categories", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{})
-	})
+	}))
 
 	return mux
+}
+
+func (s *Shim) handleLogin(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	user := r.FormValue("username")
+	pass := r.FormValue("password")
+	if !s.session.validate(user, pass) {
+		// Match qBittorrent's response shape: 200 with "Fails." body.
+		// Sonarr keys off the body, not the status, so don't change either.
+		fmt.Fprint(w, "Fails.")
+		return
+	}
+	tok := s.session.issue()
+	http.SetCookie(w, &http.Cookie{
+		Name:     "SID",
+		Value:    tok,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   24 * 60 * 60,
+	})
+	fmt.Fprint(w, "Ok.")
+}
+
+func (s *Shim) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("SID"); err == nil {
+		s.session.revoke(c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: "SID", Value: "", Path: "/", MaxAge: -1})
+	fmt.Fprint(w, "Ok.")
 }
 
 // handleAdd accepts Sonarr's grab. Sonarr submits a multipart form whose
@@ -92,10 +152,10 @@ func (s *Shim) handleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing urls", http.StatusBadRequest)
 		return
 	}
-	magnet := strings.Split(urls, "\n")[0]
+	magnet := strings.TrimSpace(strings.Split(urls, "\n")[0])
 	synthHash := infohashFromMagnet(magnet)
-	if synthHash == "" {
-		http.Error(w, "non-magnet add not supported", http.StatusBadRequest)
+	if !isInfohash(synthHash) {
+		http.Error(w, "invalid magnet infohash", http.StatusBadRequest)
 		return
 	}
 
@@ -105,12 +165,11 @@ func (s *Shim) handleAdd(w http.ResponseWriter, r *http.Request) {
 	// For (b) we register a passthrough grab — single-season, no real-hash
 	// mapping. The grabber treats it the same way as a synthetic grab; the
 	// season detector still works on the file list.
-	if g, ok := s.Store.Get(synthHash); ok {
+	if _, ok := s.Store.Get(synthHash); ok {
 		s.Store.Update(synthHash, func(gr *store.Grab) {
 			gr.Magnet = magnet
 			gr.Category = category
 		})
-		_ = g
 	} else {
 		g := &store.Grab{
 			SynthHash: synthHash,
@@ -149,6 +208,10 @@ func (s *Shim) handleInfo(w http.ResponseWriter, r *http.Request) {
 func (s *Shim) handleDelete(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	for _, h := range splitCSV(r.FormValue("hashes")) {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if !isInfohash(h) {
+			continue
+		}
 		_ = s.Store.Delete(h)
 	}
 	fmt.Fprint(w, "Ok.")
@@ -251,6 +314,9 @@ func displayNameFromMagnet(magnet string) string {
 // passthrough-grab behavior. This hook is the place to plug in caching once
 // we want correctness for re-search-then-grab flows.
 func (s *Shim) RegisterSynthetic(synthHash, realHash, magnet string, season int, title string) {
+	if !isInfohash(synthHash) || !isInfohash(realHash) {
+		return
+	}
 	g := &store.Grab{
 		SynthHash: synthHash,
 		RealHash:  realHash,

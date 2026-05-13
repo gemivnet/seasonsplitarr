@@ -2,6 +2,23 @@
 
 > Make Sonarr handle multi-season torrent packs — without changing Sonarr.
 
+> [!IMPORTANT]
+> **Disclaimer.** seasonsplitarr is an AI-assisted personal project, built
+> to solve one user's specific problem and shared publicly in case it's
+> useful. It comes with **no warranty and no liability** — for security,
+> data loss, Real-Debrid account issues, missed episodes, blocklisted
+> indexers, or anything else. Use at your own risk.
+>
+> Contributions are welcome but accepted at the maintainer's discretion
+> and bandwidth, and there is no guarantee that issues will be addressed
+> or that the project will continue to be maintained. If that's a
+> blocker for you, please **fork the repo** in accordance with the
+> [AGPL-3.0 license](./LICENSE) and adapt it to your needs.
+>
+> Security issues: please report via
+> [GitHub Security Advisories](https://github.com/gemivnet/seasonsplitarr/security/advisories/new)
+> rather than public issues. See [SECURITY.md](./SECURITY.md).
+
 Sonarr can't import a torrent that contains multiple seasons in one release
 (e.g. `Some.Show.S01-S07.COMPLETE.1080p...`). It will grab only the first
 season's metadata, get confused by the rest, and often blocklist the release.
@@ -103,7 +120,9 @@ Copy [`docker-compose.example.yml`](./docker-compose.example.yml) to
 |---|---|
 | `SS_UPSTREAM_URL` | A Torznab feed URL from Prowlarr (Prowlarr → Indexers → click an indexer → **Copy Torznab Feed**). |
 | `SS_UPSTREAM_APIKEY` | The API key from that same Prowlarr indexer page. |
-| `SS_APIKEY` | Any random string. You'll paste this into Prowlarr in step 2. |
+| `SS_APIKEY` | Random string ≥ 16 chars (`openssl rand -hex 24`). You'll paste this into Prowlarr in step 2. |
+| `SS_QBIT_USERNAME` | Username Sonarr will use to log in to seasonsplitarr's download-client interface. Anything you want. |
+| `SS_QBIT_PASSWORD` | Strong password ≥ 12 chars (`openssl rand -base64 18`). Without this, anyone on your network could submit magnets to seasonsplitarr. |
 | `SS_REALDEBRID_TOKEN` | From <https://real-debrid.com/apitoken>. |
 
 Then:
@@ -126,7 +145,7 @@ config needed.
 In Sonarr → **Settings → Download Clients** → **Add** → **qBittorrent**:
 - **Host:** `seasonsplitarr`
 - **Port:** `7474`
-- **Username/Password:** anything (seasonsplitarr accepts any credentials)
+- **Username/Password:** match `SS_QBIT_USERNAME` / `SS_QBIT_PASSWORD`
 - **Category:** `tv-sonarr` (or whatever you use)
 
 That's it. Do a manual search in Sonarr — multi-season packs from your
