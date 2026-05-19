@@ -42,6 +42,17 @@ type Grabber struct {
 	PollInterval time.Duration
 	// inflight prevents two concurrent ticks from operating on the same grab.
 	inflight sync.Map // synthHash -> struct{}
+	// rdAddLocks serialises addMagnet calls per realHash so sibling synthetic
+	// grabs share one RD torrent instead of racing to create N duplicates and
+	// tripping RD's per-account rate limit.
+	rdAddLocks sync.Map // realHash -> *sync.Mutex
+}
+
+func (g *Grabber) lockRealHash(realHash string) *sync.Mutex {
+	v, _ := g.rdAddLocks.LoadOrStore(realHash, &sync.Mutex{})
+	m := v.(*sync.Mutex)
+	m.Lock()
+	return m
 }
 
 func (g *Grabber) Run(ctx context.Context) {
@@ -100,33 +111,44 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 		return nil
 	}
 
-	// 1. Register with RD if not already.
+	// 1. Register with RD if not already. Serialise per realHash so a pack
+	//    that spawned N synthetic siblings only hits addMagnet once.
 	if grab.RDTorrentID == "" {
-		// Reuse an RD torrent across grabs that share the same real infohash.
-		var rdID string
-		for _, sibling := range g.Store.ByRealHash(grab.RealHash) {
-			if sibling.RDTorrentID != "" {
-				rdID = sibling.RDTorrentID
-				glog.Info("advance %s: reusing RD torrent %s from sibling S%02d",
-					synthHash[:8], rdID, sibling.Season)
-				break
+		mu := g.lockRealHash(grab.RealHash)
+		// Re-check store under the lock — a sibling may have set RDTorrentID
+		// while we were waiting.
+		current, _ := g.Store.Get(synthHash)
+		if current != nil && current.RDTorrentID != "" {
+			mu.Unlock()
+			grab = current
+		} else {
+			var rdID string
+			for _, sibling := range g.Store.ByRealHash(grab.RealHash) {
+				if sibling.RDTorrentID != "" {
+					rdID = sibling.RDTorrentID
+					glog.Info("advance %s: reusing RD torrent %s from sibling S%02d",
+						synthHash[:8], rdID, sibling.Season)
+					break
+				}
 			}
-		}
-		if rdID == "" {
-			glog.Info("advance %s: adding magnet to Real-Debrid (S%02d %q)",
-				synthHash[:8], grab.Season, grab.Title)
-			res, err := g.RD.AddMagnet(ctx, grab.Magnet)
-			if err != nil {
-				return fmt.Errorf("rd addMagnet: %w", err)
+			if rdID == "" {
+				glog.Info("advance %s: adding magnet to Real-Debrid (S%02d %q)",
+					synthHash[:8], grab.Season, grab.Title)
+				res, err := g.RD.AddMagnet(ctx, grab.Magnet)
+				if err != nil {
+					mu.Unlock()
+					return fmt.Errorf("rd addMagnet: %w", err)
+				}
+				rdID = res.ID
+				glog.Info("advance %s: RD torrent created, id=%s", synthHash[:8], rdID)
 			}
-			rdID = res.ID
-			glog.Info("advance %s: RD torrent created, id=%s", synthHash[:8], rdID)
+			_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
+				gr.RDTorrentID = rdID
+				gr.State = store.StateDownloading
+			})
+			mu.Unlock()
+			grab, _ = g.Store.Get(synthHash)
 		}
-		_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
-			gr.RDTorrentID = rdID
-			gr.State = store.StateDownloading
-		})
-		grab, _ = g.Store.Get(synthHash)
 	}
 
 	// 2. Probe RD state.
@@ -182,11 +204,26 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 }
 
 // fileIDsForGrabs returns the union of file IDs in `files` that belong to any
-// grab's season. Used so a single selectFiles call covers all known siblings.
+// grab's season. If any sibling grab has season=0 (passthrough — Sonarr
+// grabbed a single-episode release we didn't pre-register), we don't have
+// season metadata to filter on, so select all files and let Sonarr's import
+// scan pick what it wants.
 func (g *Grabber) fileIDsForGrabs(files []debrid.File, grabs []*store.Grab) []int {
 	wantedSeasons := map[int]bool{}
+	hasPassthrough := false
 	for _, gr := range grabs {
+		if gr.Season == 0 {
+			hasPassthrough = true
+			break
+		}
 		wantedSeasons[gr.Season] = true
+	}
+	if hasPassthrough {
+		ids := make([]int, 0, len(files))
+		for _, f := range files {
+			ids = append(ids, f.ID)
+		}
+		return ids
 	}
 	var ids []int
 	for _, f := range files {

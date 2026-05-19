@@ -184,8 +184,10 @@ func (s *Shim) handleAdd(w http.ResponseWriter, r *http.Request) {
 	if existing, ok := s.Store.Get(synthHash); ok {
 		qlog.Info("torrents/add: matched pre-registered synthetic grab hash=%s title=%q season=%d",
 			synthHash, existing.Title, existing.Season)
+		// Do NOT overwrite gr.Magnet with the synthetic-btih magnet Sonarr
+		// sent. RegisterSynthetic stored the REAL upstream magnet; that's
+		// what we need to hand to Real-Debrid.
 		_, _ = s.Store.Update(synthHash, func(gr *store.Grab) {
-			gr.Magnet = magnet
 			gr.Category = category
 		})
 	} else {
