@@ -117,8 +117,8 @@ Copy [`docker-compose.example.yml`](./docker-compose.example.yml) to
 
 | Variable | What |
 |---|---|
-| `SS_UPSTREAM_URL` | A Torznab feed URL from Prowlarr (Prowlarr → Indexers → click an indexer → **Copy Torznab Feed**). |
-| `SS_UPSTREAM_APIKEY` | The API key from that same Prowlarr indexer page. |
+| `SS_UPSTREAM_URL` | One or more Torznab feed URLs, comma-separated. From Prowlarr → Indexers → click an indexer → **Copy Torznab Feed**. Searches fan out across all of them in parallel and merge with infohash dedupe. |
+| `SS_UPSTREAM_APIKEY` | API key for those upstreams. Prowlarr uses one key for all indexers, so a single value works; supply a comma-separated list if upstreams need different keys. |
 | `SS_APIKEY` | Random string ≥ 16 chars (`openssl rand -hex 24`). You'll paste this into Prowlarr in step 2. |
 | `SS_QBIT_USERNAME` | Username Sonarr will use to log in to seasonsplitarr's download-client interface. Anything you want. |
 | `SS_QBIT_PASSWORD` | Strong password ≥ 12 chars (`openssl rand -base64 18`). Without this, anyone on your network could submit magnets to seasonsplitarr. |

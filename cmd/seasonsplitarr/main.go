@@ -34,8 +34,10 @@ func main() {
 
 	logger.Info("config loaded:")
 	logger.Info("  SS_LISTEN              = %s", cfg.Listen)
-	logger.Info("  SS_UPSTREAM_URL        = %s", cfg.UpstreamURL)
-	logger.Info("  SS_UPSTREAM_APIKEY     = %s", logging.Redact(cfg.UpstreamAPIKey))
+	logger.Info("  upstreams              = %d configured", len(cfg.Upstreams))
+	for i, u := range cfg.Upstreams {
+		logger.Info("    [%d] %s (apikey=%s)", i, u.URL, logging.Redact(u.APIKey))
+	}
 	logger.Info("  SS_APIKEY              = %s (len=%d)", logging.Redact(cfg.APIKey), len(cfg.APIKey))
 	logger.Info("  SS_QBIT_USERNAME       = %s", cfg.QBitUsername)
 	logger.Info("  SS_QBIT_PASSWORD       = %s (len=%d)", logging.Redact(cfg.QBitPassword), len(cfg.QBitPassword))
@@ -66,11 +68,14 @@ func main() {
 
 	shim := qbittorrent.NewShim(cfg.DownloadsDir, cfg.QBitUsername, cfg.QBitPassword, st)
 
+	ups := make([]torznab.Upstream, len(cfg.Upstreams))
+	for i, u := range cfg.Upstreams {
+		ups[i] = torznab.Upstream{URL: u.URL, APIKey: u.APIKey}
+	}
 	proxy := &torznab.Proxy{
-		UpstreamURL:    cfg.UpstreamURL,
-		UpstreamAPIKey: cfg.UpstreamAPIKey,
-		LocalAPIKey:    cfg.APIKey,
-		OnSynthetic:    shim.RegisterSynthetic,
+		Upstreams:   ups,
+		LocalAPIKey: cfg.APIKey,
+		OnSynthetic: shim.RegisterSynthetic,
 	}
 
 	mux := http.NewServeMux()

@@ -15,18 +15,24 @@ import (
 
 var plog = logging.New("torznab")
 
+// Upstream is one Torznab indexer the proxy fans out to.
+type Upstream struct {
+	URL    string
+	APIKey string
+}
+
 // Proxy is a Torznab proxy that fans out multi-season pack results into
-// per-season synthetic releases.
+// per-season synthetic releases. When configured with multiple Upstreams,
+// search queries are executed against all of them in parallel and the
+// merged result is split.
 type Proxy struct {
-	UpstreamURL    string
-	UpstreamAPIKey string
+	// Upstreams is the list of Torznab indexers to query.
+	Upstreams []Upstream
 	// LocalAPIKey is the key that incoming requests (from Prowlarr/Sonarr)
 	// must present.
 	LocalAPIKey string
 	Client      *http.Client
 	// OnSynthetic is called for every synthetic per-season release emitted.
-	// Implementations typically register the grab in the state store so the
-	// download client side can resolve synthHash -> (realHash, magnet, season).
 	OnSynthetic func(synthHash, realHash, magnet string, season int, title string)
 }
 
@@ -52,54 +58,106 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	mode := strings.ToLower(q.Get("t"))
-	plog.Info("torznab query: t=%s q=%q season=%s ep=%s cat=%s",
-		mode, q.Get("q"), q.Get("season"), q.Get("ep"), q.Get("cat"))
+	plog.Info("torznab query: t=%s q=%q season=%s ep=%s cat=%s upstreams=%d",
+		mode, q.Get("q"), q.Get("season"), q.Get("ep"), q.Get("cat"), len(p.Upstreams))
 
-	upstream, err := url.Parse(p.UpstreamURL)
-	if err != nil {
-		plog.Error("bad SS_UPSTREAM_URL %q: %v", p.UpstreamURL, err)
-		http.Error(w, "bad upstream config", http.StatusInternalServerError)
+	if len(p.Upstreams) == 0 {
+		plog.Error("no upstreams configured")
+		http.Error(w, "no upstreams configured", http.StatusInternalServerError)
 		return
 	}
-	q.Set("apikey", p.UpstreamAPIKey)
-	upstream.RawQuery = q.Encode()
 
-	plog.Debug("upstream GET %s://%s%s?<query>", upstream.Scheme, upstream.Host, upstream.Path)
-	upstreamStart := time.Now()
-	resp, err := p.client().Get(upstream.String())
-	if err != nil {
-		plog.Error("upstream error: %v", err)
-		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		plog.Error("upstream read error: %v", err)
-		http.Error(w, "upstream read error", http.StatusBadGateway)
-		return
-	}
-	plog.Info("upstream replied: %d (%d bytes, %s)", resp.StatusCode, len(body), time.Since(upstreamStart))
-
-	// Only attempt to rewrite XML search responses. Caps, errors, etc. pass through.
-	if mode != "search" && mode != "tvsearch" && mode != "movie" {
-		plog.Debug("passthrough (mode=%q, not a search)", mode)
+	// Caps and other non-search queries: only the first upstream answers.
+	// They're identical-shaped across indexers and Prowlarr already aggregates
+	// them for clients.
+	isSearch := mode == "search" || mode == "tvsearch" || mode == "movie"
+	if !isSearch {
+		resp, body, ok := p.fetchOne(p.Upstreams[0], q)
+		if !ok {
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		plog.Debug("passthrough (mode=%q) from %s", mode, p.Upstreams[0].URL)
 		passThrough(w, resp, body)
 		return
 	}
 
-	rewritten, err := splitFeed(body, p.OnSynthetic)
+	// Fan out search across all upstreams in parallel.
+	type result struct {
+		idx  int
+		body []byte
+		ct   string
+	}
+	results := make(chan result, len(p.Upstreams))
+	start := time.Now()
+	for i, up := range p.Upstreams {
+		go func(i int, up Upstream) {
+			resp, body, ok := p.fetchOne(up, q)
+			if !ok {
+				results <- result{idx: i}
+				return
+			}
+			defer resp.Body.Close()
+			results <- result{idx: i, body: body, ct: resp.Header.Get("Content-Type")}
+		}(i, up)
+	}
+
+	bodies := make([][]byte, len(p.Upstreams))
+	for range p.Upstreams {
+		r := <-results
+		bodies[r.idx] = r.body
+	}
+	plog.Info("fan-out complete: %d upstreams queried in %s", len(p.Upstreams), time.Since(start))
+
+	rewritten, err := splitFeedMulti(bodies, p.OnSynthetic)
 	if err != nil {
-		plog.Warn("splitFeed parse failed (%v) — passing upstream body through unchanged", err)
-		// On any parse error, fail open: serve the upstream response unchanged.
-		passThrough(w, resp, body)
+		plog.Warn("splitFeedMulti failed (%v) — falling back to first non-empty upstream", err)
+		for _, b := range bodies {
+			if len(b) > 0 {
+				w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(b)
+				return
+			}
+		}
+		http.Error(w, "all upstreams failed", http.StatusBadGateway)
 		return
 	}
-	plog.Info("served rewritten feed (%d bytes)", len(rewritten))
+	plog.Info("served merged+rewritten feed (%d bytes)", len(rewritten))
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(rewritten)
+}
+
+// fetchOne queries a single upstream and returns the response. Caller must
+// close resp.Body. Returns ok=false on any error (logged here).
+func (p *Proxy) fetchOne(up Upstream, q url.Values) (*http.Response, []byte, bool) {
+	parsed, err := url.Parse(up.URL)
+	if err != nil {
+		plog.Error("bad upstream URL %q: %v", up.URL, err)
+		return nil, nil, false
+	}
+	uq := url.Values{}
+	for k, v := range q {
+		uq[k] = v
+	}
+	uq.Set("apikey", up.APIKey)
+	parsed.RawQuery = uq.Encode()
+	t0 := time.Now()
+	resp, err := p.client().Get(parsed.String())
+	if err != nil {
+		plog.Error("upstream %s error: %v", up.URL, err)
+		return nil, nil, false
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		plog.Error("upstream %s read error: %v", up.URL, err)
+		_ = resp.Body.Close()
+		return nil, nil, false
+	}
+	plog.Info("upstream %s -> %d (%d bytes, %s)", up.URL, resp.StatusCode, len(body), time.Since(t0))
+	return resp, body, true
 }
 
 func (p *Proxy) client() *http.Client {
@@ -155,6 +213,52 @@ type anyEl struct {
 	XMLName xml.Name
 	Attrs   []xml.Attr `xml:",any,attr"`
 	Inner   string     `xml:",innerxml"`
+}
+
+// splitFeedMulti parses multiple upstream feed bodies, merges their items
+// (deduping by infohash), and splits multi-season packs. Empty/failed bodies
+// are skipped. Returns an error only if every body fails to parse.
+func splitFeedMulti(bodies [][]byte, onSynth func(synthHash, realHash, magnet string, season int, title string)) ([]byte, error) {
+	var merged rss
+	merged.Channel.Title = "seasonsplitarr"
+	merged.Channel.Description = "Merged Torznab feed from multiple upstreams"
+	seen := map[string]bool{}
+	parsedCount := 0
+	for i, body := range bodies {
+		if len(body) == 0 {
+			continue
+		}
+		var feed rss
+		if err := xml.Unmarshal(body, &feed); err != nil {
+			plog.Warn("upstream #%d: parse failed (%v), skipping", i, err)
+			continue
+		}
+		parsedCount++
+		if merged.Attrs == nil {
+			merged.Attrs = feed.Attrs
+		}
+		for _, it := range feed.Channel.Items {
+			ih := strings.ToLower(extractInfohash(it))
+			if ih != "" {
+				if seen[ih] {
+					continue
+				}
+				seen[ih] = true
+			}
+			merged.Channel.Items = append(merged.Channel.Items, it)
+		}
+	}
+	if parsedCount == 0 {
+		return nil, fmt.Errorf("no upstream feeds parsed")
+	}
+	plog.Info("merged %d upstream feeds: %d unique items", parsedCount, len(merged.Channel.Items))
+
+	// Run the same season-splitting logic over the merged items.
+	body, err := xml.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return splitFeed(append([]byte(xml.Header), body...), onSynth)
 }
 
 func splitFeed(body []byte, onSynth func(synthHash, realHash, magnet string, season int, title string)) ([]byte, error) {

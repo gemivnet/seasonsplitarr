@@ -10,10 +10,17 @@ import (
 	"strings"
 )
 
+// Upstream is one Torznab indexer that seasonsplitarr proxies.
+type Upstream struct {
+	URL    string
+	APIKey string
+}
+
 type Config struct {
-	Listen          string
-	UpstreamURL     string
-	UpstreamAPIKey  string
+	Listen string
+	// Upstreams is the list of Torznab indexers to fan out to. Order matches
+	// SS_UPSTREAM_URL / SS_UPSTREAM_APIKEY entries.
+	Upstreams       []Upstream
 	APIKey          string
 	RealDebridToken string
 	DownloadsDir    string
@@ -30,8 +37,6 @@ type Config struct {
 func Load() (*Config, error) {
 	c := &Config{
 		Listen:          getenv("SS_LISTEN", "0.0.0.0:7474"),
-		UpstreamURL:     os.Getenv("SS_UPSTREAM_URL"),
-		UpstreamAPIKey:  os.Getenv("SS_UPSTREAM_APIKEY"),
 		APIKey:          os.Getenv("SS_APIKEY"),
 		RealDebridToken: os.Getenv("SS_REALDEBRID_TOKEN"),
 		DownloadsDir:    getenv("SS_DOWNLOADS_DIR", "/downloads/seasonsplitarr"),
@@ -39,8 +44,11 @@ func Load() (*Config, error) {
 		QBitPassword:    os.Getenv("SS_QBIT_PASSWORD"),
 	}
 
+	urls := splitCSV(os.Getenv("SS_UPSTREAM_URL"))
+	keys := splitCSV(os.Getenv("SS_UPSTREAM_APIKEY"))
+
 	var missing []string
-	if c.UpstreamURL == "" {
+	if len(urls) == 0 {
 		missing = append(missing, "SS_UPSTREAM_URL")
 	}
 	if c.APIKey == "" {
@@ -61,7 +69,42 @@ func Load() (*Config, error) {
 	if len(c.QBitPassword) < 12 {
 		return nil, fmt.Errorf("SS_QBIT_PASSWORD must be at least 12 characters")
 	}
+
+	// Pair URLs with keys positionally. If only one key is supplied, reuse it
+	// for every URL — common when proxying multiple Prowlarr indexers that
+	// share the same Prowlarr API key.
+	if len(keys) > 1 && len(keys) != len(urls) {
+		return nil, fmt.Errorf("SS_UPSTREAM_APIKEY has %d entries but SS_UPSTREAM_URL has %d; supply one key, or one per URL",
+			len(keys), len(urls))
+	}
+	for i, u := range urls {
+		var k string
+		switch len(keys) {
+		case 0:
+			k = ""
+		case 1:
+			k = keys[0]
+		default:
+			k = keys[i]
+		}
+		c.Upstreams = append(c.Upstreams, Upstream{URL: u, APIKey: k})
+	}
 	return c, nil
+}
+
+// splitCSV splits a comma-separated env value, trims whitespace, and drops empties.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getenv(key, def string) string {
