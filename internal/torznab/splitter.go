@@ -19,14 +19,27 @@ type SeasonRange struct {
 }
 
 // patterns matches the most common ways scene/p2p releases describe a
-// multi-season pack. Ordered most-specific first.
+// multi-season pack. Ordered most-specific first. The Detect loop's
+// plausibility filter (end > start, end-start <= 30) catches false positives
+// from looser patterns, so we err on the side of broader matching here.
 var patterns = []*regexp.Regexp{
-	// S01-S05, S01.S05, S01_S05
+	// S01-S05, S01.S05, S01_S05, S01 S05, S01S05 (with-second-S forms).
 	regexp.MustCompile(`(?i)\bS(\d{1,2})[-._ ]?S(\d{1,2})\b`),
-	// Seasons 1-5, Season 1-5
+	// S01-05, S01–05 (dash or en-dash). Hyphen is required to avoid matching
+	// episode-pair notations like S01E05 (no hyphen → no match), and the
+	// second S is omitted, which is the most common variant we miss in the
+	// wild ("Anthony Bourdain No Reservations S01-03").
+	regexp.MustCompile(`(?i)\bS(\d{1,2})\s?[-–]\s?(\d{1,2})\b`),
+	// S01 to S05, S01 thru S05, S01 through S05. Second S optional.
+	regexp.MustCompile(`(?i)\bS(\d{1,2})\s+(?:to|thru|through)\s+S?(\d{1,2})\b`),
+	// Seasons 1-5, Season 1-5.
 	regexp.MustCompile(`(?i)\bSeasons?[\s._-]*(\d{1,2})[\s._-]*[-–][\s._-]*(\d{1,2})\b`),
-	// Series 1-5 (UK)
+	// Seasons 1 to 5, Season 1 through 5.
+	regexp.MustCompile(`(?i)\bSeasons?[\s._-]+(\d{1,2})\s+(?:to|thru|through)\s+(\d{1,2})\b`),
+	// Series 1-5 (UK).
 	regexp.MustCompile(`(?i)\bSeries[\s._-]*(\d{1,2})[\s._-]*[-–][\s._-]*(\d{1,2})\b`),
+	// Series 1 to 5 (UK).
+	regexp.MustCompile(`(?i)\bSeries[\s._-]+(\d{1,2})\s+(?:to|thru|through)\s+(\d{1,2})\b`),
 }
 
 // completePattern matches "Complete Series" / "Complete Collection" — these

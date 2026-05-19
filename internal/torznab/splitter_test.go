@@ -15,6 +15,23 @@ func TestDetect(t *testing.T) {
 		{"Some.Show.S03.COMPLETE.1080p.x264-GRP", 0, 0, false},
 		{"Some.Show.S03E04.1080p.x264-GRP", 0, 0, false},
 		{"Some.Show.S01.S05.Bundle", 1, 5, true},
+		// "S01-03" form (no second S, dash separator). The case from the wild:
+		// Anthony Bourdain No Reservations S01-03.
+		{"Anthony Bourdain No Reservations S01-03", 1, 3, true},
+		{"Some.Show.S01-07.1080p.WEB-DL", 1, 7, true},
+		// En-dash variant.
+		{"Some Show S01–05 1080p", 1, 5, true},
+		// "to" / "thru" / "through" connectors.
+		{"Some Show S01 to S07 1080p", 1, 7, true},
+		{"Some Show S01 thru S07 1080p", 1, 7, true},
+		{"Some Show S01 through S07 1080p", 1, 7, true},
+		{"Some Show Seasons 1 to 7", 1, 7, true},
+		{"Some Show Series 1 through 5", 1, 5, true},
+		// Episode-pair notations must NOT be misread as season ranges.
+		{"Some.Show.S07E01-E10.1080p", 0, 0, false},
+		{"Some.Show.S07.E01-E03.1080p", 0, 0, false},
+		// "S0107" with no separator must not be misread as S01-S07.
+		{"Some.Show.S0107.1080p", 0, 0, false},
 	}
 	for _, tc := range cases {
 		got := Detect(tc.in)
