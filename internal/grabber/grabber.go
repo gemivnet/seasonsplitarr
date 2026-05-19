@@ -272,9 +272,16 @@ func (g *Grabber) materialise(ctx context.Context, grab *store.Grab, info *debri
 
 	var totalBytes int64
 	for _, p := range pairs {
-		s := seasonparse.FromFilename(p.f.Path)
-		if s != grab.Season {
-			continue
+		// Synthetic season-split grabs filter by parsed season: the RD torrent
+		// contains files from many seasons and we only want this one's. But
+		// passthrough grabs (single-episode releases that weren't split) have
+		// grab.Season=0 and the file parses to its real season, so the filter
+		// would reject everything. Skip the filter when grab.Season==0.
+		if grab.Season != 0 {
+			s := seasonparse.FromFilename(p.f.Path)
+			if s != grab.Season {
+				continue
+			}
 		}
 		base := filepath.Base(p.f.Path)
 		cachePath := filepath.Join(cacheRoot, fmt.Sprintf("%d-%s", p.f.ID, base))
