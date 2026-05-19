@@ -19,6 +19,8 @@ type L struct {
 func New(tag string) *L { return &L{tag: tag} }
 
 func (l *L) Printf(format string, args ...any) {
+	// #nosec G706 -- l.tag is a compile-time string set by callers via New(),
+	// not user input. Format string concatenation here is safe.
 	log.Printf("["+l.tag+"] "+format, args...)
 }
 
