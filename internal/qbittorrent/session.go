@@ -80,6 +80,8 @@ func (s *session) check(r *http.Request) bool {
 func (s *Shim) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.session.check(r) {
+			qlog.Warn("auth required: %s %s rejected (no/invalid SID) from %s",
+				r.Method, r.URL.Path, r.RemoteAddr)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}

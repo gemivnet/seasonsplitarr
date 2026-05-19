@@ -14,7 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gemivnet/seasonsplitarr/internal/logging"
 )
+
+var dlog = logging.New("rd")
 
 const baseURL = "https://api.real-debrid.com/rest/1.0"
 
@@ -125,13 +129,17 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values, o
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
+	t0 := time.Now()
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
+		dlog.Error("%s %s failed: %v", method, path, err)
 		return err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	dlog.Debug("%s %s -> %d (%d bytes, %s)", method, path, resp.StatusCode, len(raw), time.Since(t0))
 	if resp.StatusCode >= 400 {
+		dlog.Warn("%s %s -> %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(raw)))
 		return fmt.Errorf("real-debrid %s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	if out == nil || len(raw) == 0 {

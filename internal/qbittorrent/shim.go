@@ -29,9 +29,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gemivnet/seasonsplitarr/internal/logging"
 	"github.com/gemivnet/seasonsplitarr/internal/store"
 	"github.com/gemivnet/seasonsplitarr/internal/torznab"
 )
+
+var qlog = logging.New("qbit")
 
 // isInfohash returns true if s is a 40-char lowercase hex string. We require
 // this before any value derived from a user-supplied magnet is used in a
@@ -112,12 +115,14 @@ func (s *Shim) handleLogin(w http.ResponseWriter, r *http.Request) {
 	user := r.FormValue("username")
 	pass := r.FormValue("password")
 	if !s.session.validate(user, pass) {
+		qlog.Warn("login FAILED from %s (user=%q)", r.RemoteAddr, user)
 		// Match qBittorrent's response shape: 200 with "Fails." body.
 		// Sonarr keys off the body, not the status, so don't change either.
 		fmt.Fprint(w, "Fails.")
 		return
 	}
 	tok := s.session.issue()
+	qlog.Info("login OK from %s (user=%q) -> SID=%s", r.RemoteAddr, user, logging.Redact(tok))
 	// Secure=false intentionally: Sonarr typically reaches seasonsplitarr
 	// over plain HTTP inside the docker network. With Secure=true the client
 	// would refuse to send the cookie back, breaking auth. If you expose
@@ -153,34 +158,35 @@ func (s *Shim) handleAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	urls := strings.TrimSpace(r.FormValue("urls"))
 	category := r.FormValue("category")
+	qlog.Info("torrents/add from %s: category=%q urls_len=%d", r.RemoteAddr, category, len(urls))
 	if urls == "" {
+		qlog.Warn("torrents/add rejected: missing urls field")
 		http.Error(w, "missing urls", http.StatusBadRequest)
 		return
 	}
 	magnet := strings.TrimSpace(strings.Split(urls, "\n")[0])
 	synthHash := infohashFromMagnet(magnet)
 	if !isInfohash(synthHash) {
+		qlog.Warn("torrents/add rejected: invalid infohash in magnet=%q", magnet)
 		http.Error(w, "invalid magnet infohash", http.StatusBadRequest)
 		return
 	}
 
-	// Two paths: (a) we already have a synthetic-feed entry registered for
-	// this hash, just attach the magnet/category to it; (b) Sonarr is adding
-	// a torrent that we have no record of (manual paste, non-split release).
-	// For (b) we register a passthrough grab — single-season, no real-hash
-	// mapping. The grabber treats it the same way as a synthetic grab; the
-	// season detector still works on the file list.
-	if _, ok := s.Store.Get(synthHash); ok {
+	if existing, ok := s.Store.Get(synthHash); ok {
+		qlog.Info("torrents/add: matched pre-registered synthetic grab hash=%s title=%q season=%d",
+			synthHash, existing.Title, existing.Season)
 		_, _ = s.Store.Update(synthHash, func(gr *store.Grab) {
 			gr.Magnet = magnet
 			gr.Category = category
 		})
 	} else {
+		title := displayNameFromMagnet(magnet)
+		qlog.Info("torrents/add: passthrough (no synth pre-registration) hash=%s title=%q", synthHash, title)
 		g := &store.Grab{
 			SynthHash: synthHash,
 			RealHash:  synthHash, // unknown real hash; treat as itself
 			Magnet:    magnet,
-			Title:     displayNameFromMagnet(magnet),
+			Title:     title,
 			Category:  category,
 			State:     store.StateQueued,
 			SavePath:  filepath.Join(s.DownloadsDir, synthHash),
@@ -207,6 +213,7 @@ func (s *Shim) handleInfo(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, torrentInfoJSON(g))
 	}
+	qlog.Debug("torrents/info: filter hashes=%v category=%q -> %d torrents", wantHashes, wantCategory, len(out))
 	writeJSON(w, out)
 }
 
@@ -215,8 +222,10 @@ func (s *Shim) handleDelete(w http.ResponseWriter, r *http.Request) {
 	for _, h := range splitCSV(r.FormValue("hashes")) {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if !isInfohash(h) {
+			qlog.Warn("torrents/delete: skipping non-infohash %q", h)
 			continue
 		}
+		qlog.Info("torrents/delete: hash=%s", h)
 		_ = s.Store.Delete(h)
 	}
 	fmt.Fprint(w, "Ok.")
@@ -320,8 +329,10 @@ func displayNameFromMagnet(magnet string) string {
 // we want correctness for re-search-then-grab flows.
 func (s *Shim) RegisterSynthetic(synthHash, realHash, magnet string, season int, title string) {
 	if !isInfohash(synthHash) || !isInfohash(realHash) {
+		qlog.Warn("RegisterSynthetic skipped: invalid hashes (synth=%q real=%q)", synthHash, realHash)
 		return
 	}
+	qlog.Debug("RegisterSynthetic: title=%q S%02d synthHash=%s realHash=%s", title, season, synthHash, realHash)
 	g := &store.Grab{
 		SynthHash: synthHash,
 		RealHash:  realHash,

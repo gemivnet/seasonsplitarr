@@ -8,7 +8,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/gemivnet/seasonsplitarr/internal/logging"
 )
+
+var plog = logging.New("torznab")
 
 // Proxy is a Torznab proxy that fans out multi-season pack results into
 // per-season synthetic releases.
@@ -34,26 +39,36 @@ func (p *Proxy) Handler() http.Handler {
 
 func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if p.LocalAPIKey == "" {
+		plog.Error("torznab request rejected: LocalAPIKey not configured")
 		http.Error(w, "server misconfigured: no apikey set", http.StatusInternalServerError)
 		return
 	}
 	got := r.URL.Query().Get("apikey")
 	if subtle.ConstantTimeCompare([]byte(got), []byte(p.LocalAPIKey)) != 1 {
+		plog.Warn("torznab unauthorized: apikey mismatch (got=%s) from %s", logging.Redact(got), r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
+	q := r.URL.Query()
+	mode := strings.ToLower(q.Get("t"))
+	plog.Info("torznab query: t=%s q=%q season=%s ep=%s cat=%s",
+		mode, q.Get("q"), q.Get("season"), q.Get("ep"), q.Get("cat"))
+
 	upstream, err := url.Parse(p.UpstreamURL)
 	if err != nil {
+		plog.Error("bad SS_UPSTREAM_URL %q: %v", p.UpstreamURL, err)
 		http.Error(w, "bad upstream config", http.StatusInternalServerError)
 		return
 	}
-	q := r.URL.Query()
 	q.Set("apikey", p.UpstreamAPIKey)
 	upstream.RawQuery = q.Encode()
 
+	plog.Debug("upstream GET %s://%s%s?<query>", upstream.Scheme, upstream.Host, upstream.Path)
+	upstreamStart := time.Now()
 	resp, err := p.client().Get(upstream.String())
 	if err != nil {
+		plog.Error("upstream error: %v", err)
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -61,23 +76,27 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		plog.Error("upstream read error: %v", err)
 		http.Error(w, "upstream read error", http.StatusBadGateway)
 		return
 	}
+	plog.Info("upstream replied: %d (%d bytes, %s)", resp.StatusCode, len(body), time.Since(upstreamStart))
 
 	// Only attempt to rewrite XML search responses. Caps, errors, etc. pass through.
-	mode := strings.ToLower(q.Get("t"))
 	if mode != "search" && mode != "tvsearch" && mode != "movie" {
+		plog.Debug("passthrough (mode=%q, not a search)", mode)
 		passThrough(w, resp, body)
 		return
 	}
 
 	rewritten, err := splitFeed(body, p.OnSynthetic)
 	if err != nil {
+		plog.Warn("splitFeed parse failed (%v) — passing upstream body through unchanged", err)
 		// On any parse error, fail open: serve the upstream response unchanged.
 		passThrough(w, resp, body)
 		return
 	}
+	plog.Info("served rewritten feed (%d bytes)", len(rewritten))
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(rewritten)
@@ -143,19 +162,24 @@ func splitFeed(body []byte, onSynth func(synthHash, realHash, magnet string, sea
 	if err := xml.Unmarshal(body, &feed); err != nil {
 		return nil, err
 	}
+	plog.Debug("splitFeed: %d upstream items", len(feed.Channel.Items))
 	var out []item
 	for _, it := range feed.Channel.Items {
 		sr := Detect(it.Title)
 		if sr == nil {
+			plog.Debug("  passthrough: %q", it.Title)
 			out = append(out, it)
 			continue
 		}
 		ih := extractInfohash(it)
 		magnet := magnetFromItem(it)
+		plog.Info("  detected pack: %q -> seasons %d..%d (realhash=%s)",
+			it.Title, sr.Start, sr.End, shortHash(ih))
 		for s := sr.Start; s <= sr.End; s++ {
 			si := synthItem(it, sr, s, ih)
 			if onSynth != nil && ih != "" {
 				synthHash := SyntheticInfohash(ih, s)
+				plog.Info("    -> S%02d title=%q synthHash=%s", s, si.Title, shortHash(synthHash))
 				onSynth(synthHash, strings.ToLower(ih), magnet, s, si.Title)
 			}
 			out = append(out, si)
@@ -286,3 +310,10 @@ func infohashFromMagnet(s string) string {
 
 // Ensure xml.Marshal emits unknown elements when reading anyEl.
 var _ = fmt.Sprint
+
+func shortHash(h string) string {
+	if len(h) < 10 {
+		return h
+	}
+	return h[:8] + "…"
+}

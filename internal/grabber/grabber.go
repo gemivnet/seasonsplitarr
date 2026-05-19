@@ -27,9 +27,12 @@ import (
 	"time"
 
 	"github.com/gemivnet/seasonsplitarr/internal/debrid"
+	"github.com/gemivnet/seasonsplitarr/internal/logging"
 	"github.com/gemivnet/seasonsplitarr/internal/seasonparse"
 	"github.com/gemivnet/seasonsplitarr/internal/store"
 )
+
+var glog = logging.New("grabber")
 
 type Grabber struct {
 	Store        *store.Store
@@ -46,11 +49,13 @@ func (g *Grabber) Run(ctx context.Context) {
 	if interval == 0 {
 		interval = 10 * time.Second
 	}
+	glog.Info("grabber loop starting (poll interval=%s, downloads=%s)", interval, g.DownloadsDir)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			glog.Info("grabber loop stopping (context cancelled)")
 			return
 		case <-t.C:
 			g.tick(ctx)
@@ -59,16 +64,22 @@ func (g *Grabber) Run(ctx context.Context) {
 }
 
 func (g *Grabber) tick(ctx context.Context) {
-	for _, grab := range g.Store.List() {
+	all := g.Store.List()
+	active := 0
+	for _, grab := range all {
 		if grab.State == store.StateReady || grab.State == store.StateError {
 			continue
 		}
+		active++
 		if _, busy := g.inflight.LoadOrStore(grab.SynthHash, struct{}{}); busy {
+			glog.Debug("tick: %s still inflight, skipping", grab.SynthHash[:8])
 			continue
 		}
+		glog.Debug("tick: advancing %s (state=%s title=%q)", grab.SynthHash[:8], grab.State, grab.Title)
 		go func(synthHash string) {
 			defer g.inflight.Delete(synthHash)
 			if err := g.advance(ctx, synthHash); err != nil {
+				glog.Error("grab %s: %v", synthHash, err)
 				log.Printf("grab %s: %v", synthHash, err)
 				_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
 					gr.State = store.StateError
@@ -76,6 +87,9 @@ func (g *Grabber) tick(ctx context.Context) {
 				})
 			}
 		}(grab.SynthHash)
+	}
+	if active == 0 && len(all) > 0 {
+		glog.Debug("tick: %d total grabs, none active", len(all))
 	}
 }
 
@@ -93,15 +107,20 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 		for _, sibling := range g.Store.ByRealHash(grab.RealHash) {
 			if sibling.RDTorrentID != "" {
 				rdID = sibling.RDTorrentID
+				glog.Info("advance %s: reusing RD torrent %s from sibling S%02d",
+					synthHash[:8], rdID, sibling.Season)
 				break
 			}
 		}
 		if rdID == "" {
+			glog.Info("advance %s: adding magnet to Real-Debrid (S%02d %q)",
+				synthHash[:8], grab.Season, grab.Title)
 			res, err := g.RD.AddMagnet(ctx, grab.Magnet)
 			if err != nil {
 				return fmt.Errorf("rd addMagnet: %w", err)
 			}
 			rdID = res.ID
+			glog.Info("advance %s: RD torrent created, id=%s", synthHash[:8], rdID)
 		}
 		_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
 			gr.RDTorrentID = rdID
@@ -115,16 +134,21 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 	if err != nil {
 		return fmt.Errorf("rd torrentInfo: %w", err)
 	}
+	glog.Debug("advance %s: RD status=%s progress=%d%% files=%d links=%d",
+		synthHash[:8], info.Status, info.Progress, len(info.Files), len(info.Links))
 
 	// 3. Ensure file selection covers all currently-known season needs across
 	//    sibling grabs sharing this real infohash.
 	if info.Status == "waiting_files_selection" || info.Status == "magnet_conversion" {
 		if info.Status == "magnet_conversion" {
+			glog.Debug("advance %s: RD still converting magnet, waiting", synthHash[:8])
 			return nil // try again next tick
 		}
-		fileIDs := g.fileIDsForGrabs(info.Files, g.Store.ByRealHash(grab.RealHash))
+		siblings := g.Store.ByRealHash(grab.RealHash)
+		fileIDs := g.fileIDsForGrabs(info.Files, siblings)
+		glog.Info("advance %s: selecting %d files for %d sibling grab(s)",
+			synthHash[:8], len(fileIDs), len(siblings))
 		if len(fileIDs) == 0 {
-			// No file in the torrent matches any selected season — surface as error.
 			return fmt.Errorf("no files in RD torrent match selected season(s)")
 		}
 		if err := g.RD.SelectFiles(ctx, grab.RDTorrentID, fileIDs); err != nil {
@@ -143,6 +167,7 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 	}
 
 	// 4. RD finished — fetch this grab's files to disk.
+	glog.Info("advance %s: RD ready, materialising season %d to disk", synthHash[:8], grab.Season)
 	if err := g.materialise(ctx, grab, info); err != nil {
 		return fmt.Errorf("materialise: %w", err)
 	}
@@ -152,6 +177,7 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 		gr.CompletedAt = time.Now().UTC()
 		gr.DoneBytes = gr.TotalBytes
 	})
+	glog.Info("advance %s: READY -> Sonarr can now import", synthHash[:8])
 	return nil
 }
 
@@ -218,22 +244,32 @@ func (g *Grabber) materialise(ctx context.Context, grab *store.Grab, info *debri
 		linkPath := filepath.Join(seasonDir, base)
 
 		if _, err := os.Stat(cachePath); os.IsNotExist(err) {
+			glog.Info("download: %s (%d bytes)", base, p.f.Bytes)
+			t0 := time.Now()
 			if err := g.downloadOne(ctx, p.link, cachePath); err != nil {
 				return err
 			}
+			glog.Info("download done: %s in %s", base, time.Since(t0))
 		} else if err != nil {
 			return err
+		} else {
+			glog.Debug("download skipped (cached): %s", base)
 		}
 
 		// Hardlink (fast, zero-copy); fall back to symlink across devices.
 		_ = os.Remove(linkPath)
 		if err := os.Link(cachePath, linkPath); err != nil {
+			glog.Debug("hardlink failed (%v), trying symlink: %s -> %s", err, linkPath, cachePath)
 			if err := os.Symlink(cachePath, linkPath); err != nil {
 				return fmt.Errorf("link %s -> %s: %w", linkPath, cachePath, err)
 			}
+		} else {
+			glog.Debug("hardlinked: %s -> %s", linkPath, cachePath)
 		}
 		totalBytes += p.f.Bytes
 	}
+	glog.Info("materialise %s: %d files, %d bytes total -> %s",
+		grab.SynthHash[:8], len(pairs), totalBytes, seasonDir)
 
 	_, _ = g.Store.Update(grab.SynthHash, func(gr *store.Grab) {
 		gr.ContentPath = seasonDir

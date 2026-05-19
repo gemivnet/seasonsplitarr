@@ -12,7 +12,11 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/gemivnet/seasonsplitarr/internal/logging"
 )
+
+var slog = logging.New("store")
 
 type State string
 
@@ -91,7 +95,13 @@ func Open(path string) (*Store, error) {
 func (s *Store) Put(g *Grab) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, existed := s.grabs[g.SynthHash]
 	s.grabs[g.SynthHash] = g
+	action := "Put new"
+	if existed {
+		action = "Put overwrite"
+	}
+	slog.Info("%s: hash=%s title=%q S%02d state=%s", action, g.SynthHash, g.Title, g.Season, g.State)
 	return s.flushLocked()
 }
 
@@ -142,6 +152,7 @@ func (s *Store) Delete(synthHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.grabs, synthHash)
+	slog.Info("Delete: hash=%s", synthHash)
 	return s.flushLocked()
 }
 
@@ -154,7 +165,13 @@ func (s *Store) Update(synthHash string, fn func(*Grab)) (bool, error) {
 	if !ok {
 		return false, nil
 	}
+	prev := g.State
 	fn(g)
+	if g.State != prev {
+		slog.Info("Update: hash=%s state %s -> %s", synthHash, prev, g.State)
+	} else {
+		slog.Debug("Update: hash=%s (state unchanged: %s, done=%d/%d)", synthHash, g.State, g.DoneBytes, g.TotalBytes)
+	}
 	return true, s.flushLocked()
 }
 
