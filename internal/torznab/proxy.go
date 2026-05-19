@@ -215,6 +215,48 @@ type anyEl struct {
 	Inner   string     `xml:",innerxml"`
 }
 
+// stripXmlnsAttrs removes any xmlns* declarations from attrs. Go's xml
+// encoder auto-emits namespace declarations when serializing inner elements
+// that carry a Space (like torznab:attr), so preserving xmlns from the
+// upstream causes duplicate-attribute errors in strict parsers (Sonarr).
+func stripXmlnsAttrs(attrs []xml.Attr) []xml.Attr {
+	out := attrs[:0]
+	for _, a := range attrs {
+		if a.Name.Local == "xmlns" || a.Name.Space == "xmlns" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// splitItems runs the multi-season detection + per-season fan-out over a
+// list of items, optionally notifying onSynth for each synthetic emitted.
+func splitItems(items []item, onSynth func(synthHash, realHash, magnet string, season int, title string)) []item {
+	out := make([]item, 0, len(items))
+	for _, it := range items {
+		sr := Detect(it.Title)
+		if sr == nil {
+			out = append(out, it)
+			continue
+		}
+		ih := extractInfohash(it)
+		magnet := magnetFromItem(it)
+		plog.Info("  detected pack: %q -> seasons %d..%d (realhash=%s)",
+			it.Title, sr.Start, sr.End, shortHash(ih))
+		for s := sr.Start; s <= sr.End; s++ {
+			si := synthItem(it, sr, s, ih)
+			if onSynth != nil && ih != "" {
+				synthHash := SyntheticInfohash(ih, s)
+				plog.Info("    -> S%02d title=%q synthHash=%s", s, si.Title, shortHash(synthHash))
+				onSynth(synthHash, strings.ToLower(ih), magnet, s, si.Title)
+			}
+			out = append(out, si)
+		}
+	}
+	return out
+}
+
 // splitFeedMulti parses multiple upstream feed bodies, merges their items
 // (deduping by infohash), and splits multi-season packs. Empty/failed bodies
 // are skipped. Returns an error only if every body fails to parse.
@@ -235,7 +277,7 @@ func splitFeedMulti(bodies [][]byte, onSynth func(synthHash, realHash, magnet st
 		}
 		parsedCount++
 		if merged.Attrs == nil {
-			merged.Attrs = feed.Attrs
+			merged.Attrs = stripXmlnsAttrs(feed.Attrs)
 		}
 		for _, it := range feed.Channel.Items {
 			ih := strings.ToLower(extractInfohash(it))
@@ -251,14 +293,13 @@ func splitFeedMulti(bodies [][]byte, onSynth func(synthHash, realHash, magnet st
 	if parsedCount == 0 {
 		return nil, fmt.Errorf("no upstream feeds parsed")
 	}
-	plog.Info("merged %d upstream feeds: %d unique items", parsedCount, len(merged.Channel.Items))
-
-	// Run the same season-splitting logic over the merged items.
-	body, err := xml.MarshalIndent(merged, "", "  ")
+	merged.Channel.Items = splitItems(merged.Channel.Items, onSynth)
+	plog.Info("merged %d upstream feeds -> %d items after split", parsedCount, len(merged.Channel.Items))
+	buf, err := xml.MarshalIndent(merged, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	return splitFeed(append([]byte(xml.Header), body...), onSynth)
+	return append([]byte(xml.Header), buf...), nil
 }
 
 func splitFeed(body []byte, onSynth func(synthHash, realHash, magnet string, season int, title string)) ([]byte, error) {
@@ -266,30 +307,9 @@ func splitFeed(body []byte, onSynth func(synthHash, realHash, magnet string, sea
 	if err := xml.Unmarshal(body, &feed); err != nil {
 		return nil, err
 	}
+	feed.Attrs = stripXmlnsAttrs(feed.Attrs)
 	plog.Debug("splitFeed: %d upstream items", len(feed.Channel.Items))
-	var out []item
-	for _, it := range feed.Channel.Items {
-		sr := Detect(it.Title)
-		if sr == nil {
-			plog.Debug("  passthrough: %q", it.Title)
-			out = append(out, it)
-			continue
-		}
-		ih := extractInfohash(it)
-		magnet := magnetFromItem(it)
-		plog.Info("  detected pack: %q -> seasons %d..%d (realhash=%s)",
-			it.Title, sr.Start, sr.End, shortHash(ih))
-		for s := sr.Start; s <= sr.End; s++ {
-			si := synthItem(it, sr, s, ih)
-			if onSynth != nil && ih != "" {
-				synthHash := SyntheticInfohash(ih, s)
-				plog.Info("    -> S%02d title=%q synthHash=%s", s, si.Title, shortHash(synthHash))
-				onSynth(synthHash, strings.ToLower(ih), magnet, s, si.Title)
-			}
-			out = append(out, si)
-		}
-	}
-	feed.Channel.Items = out
+	feed.Channel.Items = splitItems(feed.Channel.Items, onSynth)
 	buf, err := xml.MarshalIndent(feed, "", "  ")
 	if err != nil {
 		return nil, err
