@@ -51,7 +51,8 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	got := r.URL.Query().Get("apikey")
 	if subtle.ConstantTimeCompare([]byte(got), []byte(p.LocalAPIKey)) != 1 {
-		plog.Warn("torznab unauthorized: apikey mismatch (got=%s) from %s", logging.Redact(got), r.RemoteAddr)
+		plog.Warn("torznab unauthorized: apikey mismatch (got=%s len=%d, expected len=%d) from %s",
+			logging.Redact(got), len(got), len(p.LocalAPIKey), r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
