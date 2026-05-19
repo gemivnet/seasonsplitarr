@@ -394,18 +394,24 @@ func isPermanentFailure(err error) bool {
 // log "removed from download client" and that's fine — Sonarr already knows
 // it's gone because we just told it).
 //
-// Sonarr's queue is eventually consistent: it picks up grabs from /torrents/
-// info polling, which has a multi-second lag. A grab can fail before Sonarr
-// has noticed it. We retry the lookup a handful of times with backoff so
-// brand-new grabs that 451 immediately still get blocklisted properly.
+// Sonarr's queue is eventually consistent: it's rebuilt by Sonarr's
+// RefreshMonitoredDownloads job, which polls the download client every
+// ~60s (configurable, default DownloadClientCheckInterval=1min). Until
+// that job runs at least once after our shim starts advertising the
+// grab, /api/v3/queue returns empty for the downloadId. RD 451s
+// frequently arrive within ~10–30s of the grab — well inside one
+// Sonarr poll cycle — so we have to wait it out. We poll for ~3
+// minutes to span 2–3 poll cycles with margin; if it still hasn't
+// appeared the integration is broken in some other way and retrying
+// forever would just leak goroutines.
 func (g *Grabber) handlePermanentFailure(ctx context.Context, synthHash string, failErr error) {
 	if g.Sonarr == nil {
 		glog.Debug("grab %s: permanent failure but Sonarr API not configured; leaving as StateError",
 			synthHash[:8])
 		return
 	}
-	const attempts = 5
-	const backoff = 2 * time.Second
+	const attempts = 18
+	const backoff = 10 * time.Second
 	var queueID int
 	var found bool
 	for i := 0; i < attempts; i++ {
