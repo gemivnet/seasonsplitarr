@@ -32,6 +32,17 @@ type Config struct {
 	// read grab state.
 	QBitUsername string
 	QBitPassword string
+
+	// SonarrURL / SonarrAPIKey are OPTIONAL. When set, the grabber will
+	// reach back into Sonarr via /api/v3/queue when a grab fails
+	// irrecoverably (e.g. RD 451 infringing_file) and ask Sonarr to
+	// blocklist the release and immediately re-search. Without this,
+	// permanently-failed grabs sit in the queue with a "qBittorrent is
+	// reporting an error" warning and require manual cleanup, because the
+	// qBit protocol has no way to signal "failed, please try again"
+	// (Sonarr maps state=error → Warning by design).
+	SonarrURL    string
+	SonarrAPIKey string
 }
 
 func Load() (*Config, error) {
@@ -42,6 +53,8 @@ func Load() (*Config, error) {
 		DownloadsDir:    getenv("SS_DOWNLOADS_DIR", "/downloads/seasonsplitarr"),
 		QBitUsername:    os.Getenv("SS_QBIT_USERNAME"),
 		QBitPassword:    os.Getenv("SS_QBIT_PASSWORD"),
+		SonarrURL:       os.Getenv("SS_SONARR_URL"),
+		SonarrAPIKey:    os.Getenv("SS_SONARR_APIKEY"),
 	}
 
 	urls := splitCSV(os.Getenv("SS_UPSTREAM_URL"))

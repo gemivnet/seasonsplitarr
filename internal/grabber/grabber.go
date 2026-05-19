@@ -29,6 +29,7 @@ import (
 	"github.com/gemivnet/seasonsplitarr/internal/debrid"
 	"github.com/gemivnet/seasonsplitarr/internal/logging"
 	"github.com/gemivnet/seasonsplitarr/internal/seasonparse"
+	"github.com/gemivnet/seasonsplitarr/internal/sonarr"
 	"github.com/gemivnet/seasonsplitarr/internal/store"
 )
 
@@ -37,6 +38,12 @@ var glog = logging.New("grabber")
 type Grabber struct {
 	Store        *store.Store
 	RD           *debrid.Client
+	// Sonarr is optional. When non-nil, permanently-failed grabs (e.g. RD
+	// 451 infringing_file) are reported to Sonarr via /api/v3/queue so it
+	// blocklists the release and immediately retries with the next-best
+	// candidate. When nil, those grabs are just marked StateError and sit
+	// in the queue until manually cleared.
+	Sonarr       *sonarr.Client
 	DownloadsDir string
 	// PollInterval controls how often the grabber scans the store for work.
 	PollInterval time.Duration
@@ -96,6 +103,15 @@ func (g *Grabber) tick(ctx context.Context) {
 					gr.State = store.StateError
 					gr.Error = err.Error()
 				})
+				// If the failure is permanent (e.g. RD 451 infringing_file)
+				// and Sonarr's API is configured, ask Sonarr to blocklist
+				// the release and retry with the next candidate. Sonarr's
+				// own qBit-protocol view maps state=error to Warning by
+				// design, so without this out-of-band call these grabs
+				// just pile up in the queue forever.
+				if isPermanentFailure(err) {
+					g.handlePermanentFailure(ctx, synthHash, err)
+				}
 			}
 		}(grab.SynthHash)
 	}
@@ -344,3 +360,87 @@ func (g *Grabber) downloadOne(ctx context.Context, restrictedLink, dst string) e
 
 // Compile-time check that io is used (avoids unused import on refactors).
 var _ = io.Discard
+
+// isPermanentFailure reports whether an err from advance() represents a
+// failure that retrying won't fix. Currently this is RD's content-blocking
+// responses (451 infringing_file, 404 unknown_resource for a deleted/expired
+// release, 403 permission_denied for region-locked content). These all need
+// the same human-equivalent action: blocklist the release and try the next
+// one.
+//
+// We detect by string content rather than typed errors because the RD client
+// wraps errors with fmt.Errorf; refactoring it to expose status codes is a
+// larger change for a check used in exactly one place.
+func isPermanentFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "infringing_file"):
+		return true
+	case strings.Contains(s, "unknown_resource"):
+		return true
+	case strings.Contains(s, "permission_denied"):
+		return true
+	}
+	return false
+}
+
+// handlePermanentFailure asks Sonarr to remove the failed grab from its
+// queue, blocklist the release, and immediately re-search for a replacement.
+// On Sonarr-side success we also clear the grab from our own store so the
+// qBit /torrents/info view doesn't keep advertising it (Sonarr would just
+// log "removed from download client" and that's fine — Sonarr already knows
+// it's gone because we just told it).
+//
+// Sonarr's queue is eventually consistent: it picks up grabs from /torrents/
+// info polling, which has a multi-second lag. A grab can fail before Sonarr
+// has noticed it. We retry the lookup a handful of times with backoff so
+// brand-new grabs that 451 immediately still get blocklisted properly.
+func (g *Grabber) handlePermanentFailure(ctx context.Context, synthHash string, failErr error) {
+	if g.Sonarr == nil {
+		glog.Debug("grab %s: permanent failure but Sonarr API not configured; leaving as StateError",
+			synthHash[:8])
+		return
+	}
+	const attempts = 5
+	const backoff = 2 * time.Second
+	var queueID int
+	var found bool
+	for i := 0; i < attempts; i++ {
+		var err error
+		queueID, found, err = g.Sonarr.FindByDownloadID(ctx, synthHash)
+		if err != nil {
+			glog.Warn("grab %s: Sonarr queue lookup failed (attempt %d/%d): %v",
+				synthHash[:8], i+1, attempts, err)
+			return // Sonarr unreachable; bail rather than retry blindly.
+		}
+		if found {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+	}
+	if !found {
+		glog.Warn("grab %s: not found in Sonarr queue after %d attempts; leaving as StateError",
+			synthHash[:8], attempts)
+		return
+	}
+	if err := g.Sonarr.RemoveAndBlocklist(ctx, queueID); err != nil {
+		glog.Warn("grab %s: Sonarr blocklist+remove (queueId=%d) failed: %v",
+			synthHash[:8], queueID, err)
+		return
+	}
+	glog.Info("grab %s: Sonarr blocklisted release (queueId=%d) — Sonarr will re-search. Reason: %v",
+		synthHash[:8], queueID, failErr)
+	// Sonarr will also DELETE on the qBit shim (with deleteFiles=true if
+	// "Remove Completed" is on), which already removes the store entry and
+	// any cached files. Belt-and-braces clear it here too in case the
+	// /delete call doesn't follow for some reason — leaving stale Error
+	// grabs in the store inflates the qBit torrents/info view forever.
+	_ = g.Store.Delete(synthHash)
+}

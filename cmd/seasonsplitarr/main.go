@@ -15,6 +15,7 @@ import (
 	"github.com/gemivnet/seasonsplitarr/internal/grabber"
 	"github.com/gemivnet/seasonsplitarr/internal/logging"
 	"github.com/gemivnet/seasonsplitarr/internal/qbittorrent"
+	"github.com/gemivnet/seasonsplitarr/internal/sonarr"
 	"github.com/gemivnet/seasonsplitarr/internal/store"
 	"github.com/gemivnet/seasonsplitarr/internal/torznab"
 )
@@ -43,6 +44,12 @@ func main() {
 	logger.Info("  SS_QBIT_PASSWORD       = %s (len=%d)", logging.Redact(cfg.QBitPassword), len(cfg.QBitPassword))
 	logger.Info("  SS_REALDEBRID_TOKEN    = %s", logging.Redact(cfg.RealDebridToken))
 	logger.Info("  SS_DOWNLOADS_DIR       = %s", cfg.DownloadsDir)
+	if cfg.SonarrURL != "" && cfg.SonarrAPIKey != "" {
+		logger.Info("  SS_SONARR_URL          = %s", cfg.SonarrURL)
+		logger.Info("  SS_SONARR_APIKEY       = %s", logging.Redact(cfg.SonarrAPIKey))
+	} else {
+		logger.Info("  SS_SONARR_URL          = (unset — auto-blocklist on permanent RD failures disabled)")
+	}
 
 	// 0o755: shared with Sonarr's bind-mounted import path.
 	if err := os.MkdirAll(cfg.DownloadsDir, 0o755); err != nil { // #nosec G301 -- shared-volume scenario
@@ -60,9 +67,14 @@ func main() {
 	logger.Info("store opened: %s (existing grabs: %d)", statePath, len(st.List()))
 
 	rd := debrid.New(cfg.RealDebridToken)
+	// sonarr.New returns nil when either URL or API key is empty; the grabber
+	// handles a nil Sonarr client by falling back to its previous error-marking
+	// behavior, so this stays opt-in.
+	sonarrClient := sonarr.New(cfg.SonarrURL, cfg.SonarrAPIKey)
 	gr := &grabber.Grabber{
 		Store:        st,
 		RD:           rd,
+		Sonarr:       sonarrClient,
 		DownloadsDir: cfg.DownloadsDir,
 	}
 
