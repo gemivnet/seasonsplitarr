@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -329,6 +330,37 @@ func synthItem(orig item, sr *SeasonRange, season int, infohash string) item {
 	clone.GUID = SyntheticGUID(id, season)
 	synthHash := SyntheticInfohash(id, season)
 
+	// Divide the advertised size by the number of seasons in the pack so
+	// Sonarr's size-cutoff doesn't reject every synthetic for being as big as
+	// the whole pack. This is an estimate (per-episode counts may differ across
+	// seasons) but it's close enough for quality-profile gating.
+	numSeasons := sr.End - sr.Start + 1
+	if numSeasons > 1 {
+		clone.Size = divNumericString(clone.Size, numSeasons)
+		if clone.Enclosure != nil {
+			clone.Enclosure.Length = divNumericString(clone.Enclosure.Length, numSeasons)
+		}
+		for i, a := range clone.Attrs {
+			if !strings.EqualFold(a.XMLName.Local, "attr") {
+				continue
+			}
+			var nameVal string
+			for _, at := range a.Attrs {
+				if strings.EqualFold(at.Name.Local, "name") {
+					nameVal = at.Value
+				}
+			}
+			if !strings.EqualFold(nameVal, "size") {
+				continue
+			}
+			for j, at := range a.Attrs {
+				if strings.EqualFold(at.Name.Local, "value") {
+					clone.Attrs[i].Attrs[j].Value = divNumericString(at.Value, numSeasons)
+				}
+			}
+		}
+	}
+
 	// Rewrite magnet URLs so the synthetic release carries its own infohash.
 	// qBit-shaped download clients (and Sonarr's grab-tracking) key on the
 	// btih in the magnet — without this, all synthetic seasons for one pack
@@ -361,6 +393,19 @@ func synthItem(orig item, sr *SeasonRange, season int, infohash string) item {
 		}
 	}
 	return clone
+}
+
+// divNumericString divides a stringified non-negative integer by n. Returns
+// the original string if it doesn't parse or n <= 1.
+func divNumericString(s string, n int) string {
+	if s == "" || n <= 1 {
+		return s
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || v <= 0 {
+		return s
+	}
+	return strconv.FormatInt(v/int64(n), 10)
 }
 
 // rewriteMagnetInfohash replaces the xt=urn:btih:<hash> component of a magnet
