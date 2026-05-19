@@ -55,7 +55,7 @@ type TorrentInfo struct {
 	Hash     string   `json:"hash"`
 	Bytes    int64    `json:"bytes"`
 	Status   string   `json:"status"` // magnet_conversion, waiting_files_selection, queued, downloading, downloaded, error, ...
-	Progress int      `json:"progress"`
+	Progress float64  `json:"progress"` // RD returns a JSON number; can be fractional (e.g. 0.1)
 	Files    []File   `json:"files"`
 	Links    []string `json:"links"` // RD restricted links, one per selected file in path order
 }

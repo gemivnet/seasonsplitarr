@@ -156,7 +156,7 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 	if err != nil {
 		return fmt.Errorf("rd torrentInfo: %w", err)
 	}
-	glog.Debug("advance %s: RD status=%s progress=%d%% files=%d links=%d",
+	glog.Debug("advance %s: RD status=%s progress=%.1f%% files=%d links=%d",
 		synthHash[:8], info.Status, info.Progress, len(info.Files), len(info.Links))
 
 	// 3. Ensure file selection covers all currently-known season needs across
@@ -183,7 +183,7 @@ func (g *Grabber) advance(ctx context.Context, synthHash string) error {
 		// Still downloading on RD's side; update progress and wait.
 		_, _ = g.Store.Update(synthHash, func(gr *store.Grab) {
 			gr.TotalBytes = info.Bytes
-			gr.DoneBytes = int64(info.Progress) * info.Bytes / 100
+			gr.DoneBytes = int64(info.Progress * float64(info.Bytes) / 100)
 		})
 		return nil
 	}
