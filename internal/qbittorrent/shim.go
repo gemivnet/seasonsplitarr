@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -239,16 +240,65 @@ func (s *Shim) handleInfo(w http.ResponseWriter, r *http.Request) {
 
 func (s *Shim) handleDelete(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
+	// Sonarr passes deleteFiles=true when "Remove Completed" is enabled; honour
+	// it so the per-grab Season folder (and shared .cache, when no siblings
+	// remain) get removed. Without this the staging dir grows unboundedly.
+	deleteFiles := strings.EqualFold(r.FormValue("deleteFiles"), "true")
 	for _, h := range splitCSV(r.FormValue("hashes")) {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if !isInfohash(h) {
 			qlog.Warn("torrents/delete: skipping non-infohash %q", h)
 			continue
 		}
-		qlog.Info("torrents/delete: hash=%s", h)
+		qlog.Info("torrents/delete: hash=%s deleteFiles=%v", h, deleteFiles)
+		if deleteFiles {
+			if g, ok := s.Store.Get(h); ok {
+				s.removeGrabFiles(g)
+			}
+		}
 		_ = s.Store.Delete(h)
 	}
 	fmt.Fprint(w, "Ok.")
+}
+
+// removeGrabFiles deletes the per-grab SavePath (the Season XX hardlinks
+// Sonarr import-scanned) and, when this was the last grab pointing at the
+// underlying RD torrent, the shared .cache/<realHash> dir that holds the
+// actual file bytes. Synthetic season-split grabs share one realHash across
+// multiple sibling synthHashes, so the cache must be ref-counted: deleting it
+// while a sibling still expects it would orphan the sibling's hardlinks.
+func (s *Shim) removeGrabFiles(g *store.Grab) {
+	// SavePath is always <DownloadsDir>/<synthHash>. Re-validate before any
+	// destructive op so a malformed store entry can't trick us into removing
+	// something outside the staging tree.
+	if g.SavePath != "" && isInfohash(filepath.Base(g.SavePath)) {
+		if err := os.RemoveAll(g.SavePath); err != nil {
+			qlog.Warn("torrents/delete: remove SavePath %q failed: %v", g.SavePath, err)
+		} else {
+			qlog.Info("torrents/delete: removed grab dir %q", g.SavePath)
+		}
+	}
+	if !isInfohash(g.RealHash) {
+		return
+	}
+	// Count siblings excluding the current grab — Store.Delete hasn't run yet.
+	siblings := s.Store.ByRealHash(g.RealHash)
+	remaining := 0
+	for _, sg := range siblings {
+		if sg.SynthHash != g.SynthHash {
+			remaining++
+		}
+	}
+	if remaining > 0 {
+		qlog.Info("torrents/delete: keeping .cache/%s (%d sibling grab(s) still reference it)", g.RealHash, remaining)
+		return
+	}
+	cacheDir := filepath.Join(s.DownloadsDir, ".cache", g.RealHash)
+	if err := os.RemoveAll(cacheDir); err != nil {
+		qlog.Warn("torrents/delete: remove cache %q failed: %v", cacheDir, err)
+	} else {
+		qlog.Info("torrents/delete: removed cache dir %q", cacheDir)
+	}
 }
 
 // torrentInfoJSON renders a store.Grab as a qBit-shaped torrent record.
