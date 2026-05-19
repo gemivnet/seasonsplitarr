@@ -409,13 +409,18 @@ func extractInfohash(it item) string {
 	return ""
 }
 
-// magnetFromItem returns the magnet URL on an item, preferring enclosure.url.
+// magnetFromItem returns the magnet URL on an item. Prowlarr's Torznab output
+// puts the real magnet:? URL in <guid> while <enclosure url> is a Prowlarr
+// download-proxy URL — so we have to look at guid too, not just enclosure.
 func magnetFromItem(it item) string {
 	if it.Enclosure != nil && strings.HasPrefix(it.Enclosure.URL, "magnet:") {
 		return it.Enclosure.URL
 	}
 	if strings.HasPrefix(it.Link, "magnet:") {
 		return it.Link
+	}
+	if strings.HasPrefix(it.GUID, "magnet:") {
+		return it.GUID
 	}
 	return ""
 }

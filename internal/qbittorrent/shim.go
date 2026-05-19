@@ -182,13 +182,16 @@ func (s *Shim) handleAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if existing, ok := s.Store.Get(synthHash); ok {
-		qlog.Info("torrents/add: matched pre-registered synthetic grab hash=%s title=%q season=%d",
-			synthHash, existing.Title, existing.Season)
+		qlog.Info("torrents/add: promoting pre-registered synthetic grab hash=%s title=%q season=%d state=%s",
+			synthHash, existing.Title, existing.Season, existing.State)
 		// Do NOT overwrite gr.Magnet with the synthetic-btih magnet Sonarr
 		// sent. RegisterSynthetic stored the REAL upstream magnet; that's
-		// what we need to hand to Real-Debrid.
+		// what we need to hand to Real-Debrid. Promote to Queued so the
+		// grabber picks it up.
 		_, _ = s.Store.Update(synthHash, func(gr *store.Grab) {
 			gr.Category = category
+			gr.State = store.StateQueued
+			gr.AddedAt = time.Now().UTC()
 		})
 	} else {
 		title := displayNameFromMagnet(magnet)
@@ -216,6 +219,12 @@ func (s *Shim) handleInfo(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]map[string]any, 0)
 	for _, g := range s.Store.List() {
+		// Hide Registered grabs — they're search-time pre-registrations
+		// Sonarr never actually grabbed; surfacing them would confuse its
+		// queue.
+		if g.State == store.StateRegistered {
+			continue
+		}
 		if len(wantHashes) > 0 && !contains(wantHashes, g.SynthHash) {
 			continue
 		}
@@ -343,6 +352,11 @@ func (s *Shim) RegisterSynthetic(synthHash, realHash, magnet string, season int,
 		qlog.Warn("RegisterSynthetic skipped: invalid hashes (synth=%q real=%q)", synthHash, realHash)
 		return
 	}
+	// Skip if already in store — once Sonarr promotes to Queued we don't
+	// want a subsequent search to reset state back to Registered.
+	if _, exists := s.Store.Get(synthHash); exists {
+		return
+	}
 	qlog.Debug("RegisterSynthetic: title=%q S%02d synthHash=%s realHash=%s", title, season, synthHash, realHash)
 	g := &store.Grab{
 		SynthHash: synthHash,
@@ -350,7 +364,7 @@ func (s *Shim) RegisterSynthetic(synthHash, realHash, magnet string, season int,
 		Magnet:    magnet,
 		Title:     title,
 		Season:    season,
-		State:     store.StateQueued,
+		State:     store.StateRegistered,
 		SavePath:  filepath.Join(s.DownloadsDir, synthHash),
 		AddedAt:   time.Now().UTC(),
 	}

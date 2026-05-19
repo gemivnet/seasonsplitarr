@@ -21,6 +21,12 @@ var slog = logging.New("store")
 type State string
 
 const (
+	// StateRegistered means a synthetic per-season release has been seen in
+	// a search response (via OnSynthetic) but Sonarr has not yet grabbed it.
+	// The grabber must NOT touch these — otherwise every search would burn
+	// RD addMagnet quota for results the user never asked for. handleAdd
+	// promotes a Registered grab to Queued when Sonarr clicks download.
+	StateRegistered  State = "registered"
 	StateQueued      State = "queued"      // added by Sonarr, not yet sent to RD
 	StateDownloading State = "downloading" // RD is fetching, or we are streaming files
 	StateReady       State = "ready"       // files materialised under SavePath; Sonarr will import

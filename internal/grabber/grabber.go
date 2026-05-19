@@ -78,7 +78,7 @@ func (g *Grabber) tick(ctx context.Context) {
 	all := g.Store.List()
 	active := 0
 	for _, grab := range all {
-		if grab.State == store.StateReady || grab.State == store.StateError {
+		if grab.State == store.StateReady || grab.State == store.StateError || grab.State == store.StateRegistered {
 			continue
 		}
 		active++
