@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gemivnet/seasonsplitarr/internal/logging"
@@ -54,6 +55,13 @@ type Shim struct {
 	Store        *store.Store
 
 	session *session
+
+	catMu sync.Mutex
+	// cats holds qBit-shaped category records keyed by name. Sonarr creates
+	// "tv-sonarr" on first use and then re-queries /categories to verify it
+	// stuck; without tracking, the re-query returns {} and Sonarr fails the
+	// setup with "Configuration of category failed".
+	cats map[string]map[string]string
 }
 
 // NewShim constructs a Shim with credential-protected qBit endpoints. The
@@ -65,6 +73,7 @@ func NewShim(downloadsDir, username, password string, st *store.Store) *Shim {
 		DownloadsDir: downloadsDir,
 		Store:        st,
 		session:      newSession(username, password),
+		cats:         map[string]map[string]string{},
 	}
 }
 
@@ -101,11 +110,11 @@ func (s *Shim) Handler() http.Handler {
 		writeJSON(w, []any{})
 	}))
 	mux.HandleFunc("/api/v2/torrents/delete", s.requireAuth(s.handleDelete))
-	mux.HandleFunc("/api/v2/torrents/setCategory", s.requireAuth(okHandler))
-	mux.HandleFunc("/api/v2/torrents/createCategory", s.requireAuth(okHandler))
-	mux.HandleFunc("/api/v2/torrents/categories", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{})
-	}))
+	mux.HandleFunc("/api/v2/torrents/setCategory", s.requireAuth(s.handleSetCategory))
+	mux.HandleFunc("/api/v2/torrents/createCategory", s.requireAuth(s.handleCreateCategory))
+	mux.HandleFunc("/api/v2/torrents/editCategory", s.requireAuth(s.handleCreateCategory))
+	mux.HandleFunc("/api/v2/torrents/removeCategories", s.requireAuth(s.handleRemoveCategories))
+	mux.HandleFunc("/api/v2/torrents/categories", s.requireAuth(s.handleCategories))
 
 	return mux
 }
@@ -344,6 +353,61 @@ func (s *Shim) RegisterSynthetic(synthHash, realHash, magnet string, season int,
 		AddedAt:   time.Now().UTC(),
 	}
 	_ = s.Store.Put(g)
+}
+
+// --- category endpoints ---
+
+func (s *Shim) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("category"))
+	savePath := r.FormValue("savePath")
+	if name == "" {
+		http.Error(w, "missing category", http.StatusBadRequest)
+		return
+	}
+	if savePath == "" {
+		savePath = filepath.Join(s.DownloadsDir, name)
+	}
+	s.catMu.Lock()
+	s.cats[name] = map[string]string{"name": name, "savePath": savePath}
+	s.catMu.Unlock()
+	qlog.Info("createCategory: name=%q savePath=%q", name, savePath)
+	fmt.Fprint(w, "Ok.")
+}
+
+func (s *Shim) handleSetCategory(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("category"))
+	if name != "" {
+		s.catMu.Lock()
+		if _, ok := s.cats[name]; !ok {
+			s.cats[name] = map[string]string{"name": name, "savePath": filepath.Join(s.DownloadsDir, name)}
+		}
+		s.catMu.Unlock()
+	}
+	qlog.Debug("setCategory: hashes=%q category=%q", r.FormValue("hashes"), name)
+	fmt.Fprint(w, "Ok.")
+}
+
+func (s *Shim) handleRemoveCategories(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	for _, name := range splitCSV(r.FormValue("categories")) {
+		s.catMu.Lock()
+		delete(s.cats, name)
+		s.catMu.Unlock()
+		qlog.Info("removeCategory: name=%q", name)
+	}
+	fmt.Fprint(w, "Ok.")
+}
+
+func (s *Shim) handleCategories(w http.ResponseWriter, r *http.Request) {
+	s.catMu.Lock()
+	out := make(map[string]map[string]string, len(s.cats))
+	for k, v := range s.cats {
+		out[k] = v
+	}
+	s.catMu.Unlock()
+	writeJSON(w, out)
 }
 
 // --- helpers ---
